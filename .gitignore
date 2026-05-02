@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+.env.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+venv/
+.venv/
+
+# OS
+.DS_Store
+
+# Generated lead data & logs (large files; regenerate with sba_scraper.py)
+output/
+
+# Local logs (optional)
+data/logs/*.csv
+data/logs/*.jsonl
+data/events/*.jsonl
