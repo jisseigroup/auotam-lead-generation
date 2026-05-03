@@ -98,6 +98,21 @@ def get_or_create_contact_id_for_row(row: Dict[str, Any]) -> int:
             return get_or_create_contact_id_cur(cur, row)
 
 
+def select_contact_website_by_email(email: str) -> str:
+    """Return website from contacts if present (for merging into CSV row when using DB)."""
+    em = (email or "").strip().lower()
+    if not em:
+        return ""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(website, '') FROM contacts WHERE lower(email) = %s LIMIT 1",
+                (em,),
+            )
+            r = cur.fetchone()
+            return (r[0] or "").strip() if r else ""
+
+
 def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> int:
     email = (row.get("email") or "").strip().lower()
     if not email or "@" not in email:
@@ -110,9 +125,9 @@ def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> int:
         """
         INSERT INTO contacts (
             email, first_name, last_name, business_name, phone, address,
-            city, state, country, industry, created_at
+            city, state, country, industry, website, created_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         RETURNING id
         """,
         (
@@ -126,6 +141,7 @@ def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> int:
             (row.get("state") or "").strip() or "",
             (row.get("country") or "").strip() or "",
             (row.get("segment") or row.get("industry") or "").strip() or "",
+            (row.get("website") or "").strip() or "",
         ),
     )
     (new_id,) = cur.fetchone()
@@ -158,6 +174,7 @@ def maybe_bootstrap_contacts_from_csv(csv_path: Path) -> None:
                     (row.get("state") or "").strip() or "",
                     (row.get("country") or "").strip() or "",
                     (row.get("segment") or row.get("industry") or "").strip() or "",
+                    (row.get("website") or "").strip() or "",
                 )
             )
 
@@ -176,9 +193,9 @@ def maybe_bootstrap_contacts_from_csv(csv_path: Path) -> None:
                     """
                     INSERT INTO contacts (
                         email, first_name, last_name, business_name, phone, address,
-                        city, state, country, industry, created_at
+                        city, state, country, industry, website, created_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     """,
                     part,
                 )

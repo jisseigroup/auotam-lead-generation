@@ -64,6 +64,7 @@ def row_to_tuple(row: Dict[str, Any]) -> Optional[Tuple[Any, ...]]:
         (row.get("state") or "").strip() or "",
         (row.get("country") or "").strip() or "",
         (row.get("segment") or row.get("industry") or "").strip() or "",
+        (row.get("website") or "").strip() or "",
         datetime.now(timezone.utc),
     )
 
@@ -99,7 +100,7 @@ def main() -> None:
     insert_sql = """
         INSERT INTO contacts (
             id, email, first_name, last_name, business_name, phone, address,
-            city, state, country, industry, created_at
+            city, state, country, industry, website, created_at
         ) VALUES %s
         ON CONFLICT (email) DO NOTHING
     """

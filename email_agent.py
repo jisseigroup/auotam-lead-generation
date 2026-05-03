@@ -63,6 +63,18 @@ EST = ZoneInfo("America/New_York")
 
 ROLE_LOCALPART_PREFIXES = ("info", "support", "admin", "sales", "help", "contact", "office")
 
+
+def merge_contact_website_from_db(row: dict, email_lower: str) -> dict:
+    """When using PostgreSQL, prefer `website` stored on contacts over CSV if set."""
+    from auotam import pg_store
+
+    if not email_lower or not pg_store.use_database():
+        return row
+    dbw = pg_store.select_contact_website_by_email(email_lower)
+    if not dbw:
+        return row
+    return {**row, "website": dbw}
+
 LOG_FIELDS = [
     "timestamp_est",
     "sent_date_est",
@@ -86,25 +98,29 @@ def _tpl(subject: str, body: str) -> Dict[str, str]:
     return {"subject": subject, "body": body}
 
 
-COMMON_CLOSE = "Book a free 30-min call: auotam.com/book\nGovind Chauhan\nFounder, AUOTAM"
+COMMON_CLOSE = (
+    "Book a free 30-min call: auotam.com/book\n\n"
+    "Govind Chauhan\n\n"
+    "Founder, AUOTAM"
+)
 CASE_STUDIES_CLOSE = (
-    "See how we've done this across industries: auotam.com/case-studies\n"
-    "Book a free 30-min call: auotam.com/book\n"
-    "Govind Chauhan\n"
+    "See how we've done this across industries: auotam.com/case-studies\n\n"
+    "Book a free 30-min call: auotam.com/book\n\n"
+    "Govind Chauhan\n\n"
     "Founder, AUOTAM"
 )
 
 DEFAULT_A_SUBJECT = "How much time is your team losing to manual work?"
 DEFAULT_A_BODY = (
-    "Hi {first_name},\n"
+    "Hi {first_name},\n\n"
     "Most businesses we talk to are running on 5+ disconnected tools, no central system, "
-    "and staff doing manually what should be automated.\n"
+    "and staff doing manually what should be automated.\n\n"
     "The result - hours lost every week, inconsistent operations, and growth that's harder "
-    "than it needs to be.\n"
+    "than it needs to be.\n\n"
     "We build custom AI systems, automations, and apps that tie everything together - so your "
-    "team stops managing tools and starts getting results.\n"
+    "team stops managing tools and starts getting results.\n\n"
     "We've done this for housing authorities, eCommerce brands, nonprofits, and government "
-    "programs across the US.\n"
+    "programs across the US.\n\n"
     f"{COMMON_CLOSE}"
 )
 
@@ -112,116 +128,116 @@ TEMPLATE_VARIANTS = {
     "ecommerce": {
         "A": _tpl(
             "$2M in sales - here's the system behind it",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "One of our eCommerce clients hit $2,014,382 in sales across 7,562 orders - "
-            "without growing their team.\n"
+            "without growing their team.\n\n"
             "They were drowning in manual inventory, fulfillment bottlenecks, and payment "
-            "issues every time traffic spiked.\n"
-            "We automated the entire order lifecycle. Revenue scaled. Team didn't burn out.\n"
-            "Every month without this, you're leaving money on the table.\n"
+            "issues every time traffic spiked.\n\n"
+            "We automated the entire order lifecycle. Revenue scaled. Team didn't burn out.\n\n"
+            "Every month without this, you're leaving money on the table.\n\n"
             f"{COMMON_CLOSE}",
         ),
         "B": _tpl(
             "7,562 orders. Zero extra headcount. Here's how.",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "A retail client of ours processed 7,562 orders in one period without hiring a "
-            "single extra person.\n"
+            "single extra person.\n\n"
             "The secret wasn't hustle - it was removing every manual step from their order "
-            "lifecycle.\n"
+            "lifecycle.\n\n"
             "Inventory, routing, payments - all automated. The team stopped firefighting and "
-            "started scaling.\n"
+            "started scaling.\n\n"
             "Every day you're running manual operations, a competitor who automated is pulling "
-            "ahead.\n"
+            "ahead.\n\n"
             f"{COMMON_CLOSE}",
         ),
         "C": _tpl(
             "Your ops team is doing work a system should be doing",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most eCommerce businesses we work with have the same problem - their team is smart, "
-            "but they're spending half their day on tasks that should be automated.\n"
+            "but they're spending half their day on tasks that should be automated.\n\n"
             "Inventory updates. Payment exceptions. Fulfillment routing. All manual. All "
-            "expensive.\n"
+            "expensive.\n\n"
             "We rebuilt one client's entire backend - they hit $2M+ in sales the same period "
-            "without adding headcount.\n"
-            "That margin difference is sitting in your operations right now.\n"
+            "without adding headcount.\n\n"
+            "That margin difference is sitting in your operations right now.\n\n"
             f"{COMMON_CLOSE}",
         ),
     },
     "nonprofit": {
         "A": _tpl(
             "$10,000/month in free ad money - is your nonprofit getting it?",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "We helped an autism nonprofit unlock $10,000/month in Google Ad Grants - generating "
-            "100,000+ impressions and 6,000+ clicks.\n"
+            "100,000+ impressions and 6,000+ clicks.\n\n"
             "Most nonprofits qualify for this free advertising but never get approved or set it "
-            "up correctly.\n"
+            "up correctly.\n\n"
             "We handled the entire process - platform, payment gateway, grant approval, and "
-            "advertising execution - as one connected system.\n"
+            "advertising execution - as one connected system.\n\n"
             "Every month without this, your mission is invisible to people actively searching for "
-            "it.\n"
+            "it.\n\n"
             f"{COMMON_CLOSE}",
         ),
         "B": _tpl(
             "Your nonprofit is leaving $10,000/month on the table",
-            "Hi {first_name},\n"
-            "Google gives nonprofits $10,000 every month in free advertising. Most never claim it.\n"
+            "Hi {first_name},\n\n"
+            "Google gives nonprofits $10,000 every month in free advertising. Most never claim it.\n\n"
             "Either they don't know about it, or they apply and get rejected because their digital "
-            "foundation isn't ready.\n"
+            "foundation isn't ready.\n\n"
             "We helped an autism nonprofit get approved, set up their platform, and generate "
-            "100,000+ impressions - all through the grant.\n"
-            "Your mission deserves to be found by the people searching for it.\n"
+            "100,000+ impressions - all through the grant.\n\n"
+            "Your mission deserves to be found by the people searching for it.\n\n"
             f"{COMMON_CLOSE}",
         ),
         "C": _tpl(
             "100,000 people could be finding your nonprofit right now",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most nonprofits rely on word of mouth and donor networks. But the people who need "
-            "your services most are searching online - and not finding you.\n"
+            "your services most are searching online - and not finding you.\n\n"
             "We helped one nonprofit fix that. $10,000/month in Google Ad Grants. 100,000+ "
-            "impressions. 6,000+ clicks.\n"
+            "impressions. 6,000+ clicks.\n\n"
             "The grant exists. The audience is searching. The only missing piece is the system "
-            "to connect them.\n"
+            "to connect them.\n\n"
             f"{COMMON_CLOSE}",
         ),
     },
     "housing_real_estate": {
         "A": _tpl(
             "Processing 20,000 property applications in 4 seconds",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "We helped a New Jersey affordable housing program cut application processing from 15 "
-            "minutes to 4 seconds - across 20,000+ applications.\n"
+            "minutes to 4 seconds - across 20,000+ applications.\n\n"
             "Staff were drowning in incomplete packets, parallel email threads, and manual "
-            "exception handling every time policy shifted.\n"
+            "exception handling every time policy shifted.\n\n"
             "We built an AI-assisted intake system that validates, routes, and tracks every "
-            "application automatically - with full audit trail.\n"
+            "application automatically - with full audit trail.\n\n"
             "Every day without this, your staff is doing work a system should be doing - and "
-            "applicants are waiting longer than they should.\n"
+            "applicants are waiting longer than they should.\n\n"
             f"{COMMON_CLOSE}",
         ),
         "B": _tpl(
             "20,000 applications. 4 seconds each. No extra staff.",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "A housing program in New Jersey was spending 15 minutes reviewing every single "
-            "application manually.\n"
+            "application manually.\n\n"
             "We cut that to 4 seconds - across 20,000+ applications - without adding a single "
-            "staff member.\n"
+            "staff member.\n\n"
             "AI-assisted validation, automated routing, full audit trail. The team stopped "
-            "chasing paperwork and started making decisions.\n"
+            "chasing paperwork and started making decisions.\n\n"
             "If your team is still processing manually, the bottleneck is the system - not the "
-            "people.\n"
+            "people.\n\n"
             f"{COMMON_CLOSE}",
         ),
         "C": _tpl(
             "Your staff is reviewing applications that a system should handle",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Every incomplete application your team manually chases is time stolen from the work "
-            "that actually matters.\n"
+            "that actually matters.\n\n"
             "We built an intake system for a New Jersey housing program that validates, routes, "
             "and tracks 20,000+ applications automatically - with human review only where it "
-            "counts.\n"
-            "Processing time dropped from 15 minutes to 4 seconds per application.\n"
+            "counts.\n\n"
+            "Processing time dropped from 15 minutes to 4 seconds per application.\n\n"
             "The same system works for any high-volume intake process - housing, real estate, or "
-            "otherwise.\n"
+            "otherwise.\n\n"
             f"{COMMON_CLOSE}",
         ),
     },
@@ -229,22 +245,22 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Your clinical staff shouldn't be doing admin work",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Every hour a healthcare professional spends on intake forms, follow-up tracking, and "
-            "manual reporting is an hour not spent on patients.\n"
-            "That's not a staffing problem. That's a systems problem.\n"
+            "manual reporting is an hour not spent on patients.\n\n"
+            "That's not a staffing problem. That's a systems problem.\n\n"
             "We build platforms and automation tools that handle the admin layer - so your "
-            "clinical team does what they were trained to do.\n"
+            "clinical team does what they were trained to do.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "Patients are falling through the cracks - here's why",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "In most healthcare practices we talk to, follow-ups get missed not because staff "
-            "don't care - but because the system doesn't support them.\n"
-            "Disconnected tools. Manual tracking. No single view of the patient journey.\n"
+            "don't care - but because the system doesn't support them.\n\n"
+            "Disconnected tools. Manual tracking. No single view of the patient journey.\n\n"
             "We build connected platforms and automation systems that close those gaps - so no "
-            "patient falls through and no staff member burns out chasing paperwork.\n"
+            "patient falls through and no staff member burns out chasing paperwork.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -252,24 +268,24 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Every delayed job has a paper trail problem behind it",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most construction delays we've seen don't start on the job site - they start in the "
-            "back office.\n"
+            "back office.\n\n"
             "Miscommunication between field and office. Subcontractor scheduling done over text. "
-            "Progress updates that nobody sees in time.\n"
+            "Progress updates that nobody sees in time.\n\n"
             "We build systems that connect your field operations, scheduling, and reporting in "
-            "one place - so delays get caught before they become problems.\n"
+            "one place - so delays get caught before they become problems.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "Your crew is productive. Your systems aren't.",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "The best construction teams we've worked with have the same frustration - skilled "
-            "people held back by outdated coordination systems.\n"
+            "people held back by outdated coordination systems.\n\n"
             "Phone calls to schedule. Spreadsheets to track. Emails to report. All manual. All "
-            "slow.\n"
+            "slow.\n\n"
             "We build custom apps and automation systems that modernize your operations - so your "
-            "crew spends time building, not coordinating.\n"
+            "crew spends time building, not coordinating.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -277,22 +293,22 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Your team is spending billable hours on data entry",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most financial teams we talk to are doing work that should be automated - pulling "
-            "reports, updating records, chasing client follow-ups manually.\n"
-            "That's not just inefficient. It's expensive.\n"
+            "reports, updating records, chasing client follow-ups manually.\n\n"
+            "That's not just inefficient. It's expensive.\n\n"
             "We build automation systems that handle your data workflows end to end - so your "
-            "team spends time on decisions that actually generate revenue.\n"
+            "team spends time on decisions that actually generate revenue.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "The most expensive person in your firm shouldn't be doing this",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "When your highest-paid people spend their day on manual reporting, data entry, and "
-            "follow-up tracking - that's a systems problem disguised as a workload problem.\n"
+            "follow-up tracking - that's a systems problem disguised as a workload problem.\n\n"
             "We build custom platforms and automation workflows that take that work off their "
-            "plate entirely.\n"
-            "The result - your team does what they're best at, and your operations run cleaner.\n"
+            "plate entirely.\n\n"
+            "The result - your team does what they're best at, and your operations run cleaner.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -300,23 +316,23 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Your staff is buried in admin. Students are paying for it.",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "In most education organizations we work with, staff spend more time on paperwork "
-            "than on the people they're there to serve.\n"
+            "than on the people they're there to serve.\n\n"
             "Enrollment forms. Progress tracking. Communication follow-ups. All manual. All "
-            "time-consuming.\n"
+            "time-consuming.\n\n"
             "We build platforms and automation systems that handle the administrative layer - so "
-            "your staff focuses on students, not spreadsheets.\n"
+            "your staff focuses on students, not spreadsheets.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "Enrollment shouldn't be this hard",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most education organizations lose prospective students not because of their program "
             "- but because their enrollment and onboarding process is slow, manual, and "
-            "frustrating.\n"
+            "frustrating.\n\n"
             "We build custom intake systems and platforms that make enrollment seamless - from "
-            "first inquiry to first day - with automated follow-ups at every step.\n"
+            "first inquiry to first day - with automated follow-ups at every step.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -324,24 +340,24 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Scheduling 20 crews manually is a full-time job - it shouldn't be",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most landscaping businesses we talk to have the same bottleneck - the owner or "
-            "office manager spending hours every day just keeping jobs organized.\n"
+            "office manager spending hours every day just keeping jobs organized.\n\n"
             "Scheduling. Crew assignments. Client updates. Invoicing. All done manually, all "
-            "eating time that should go to growing the business.\n"
+            "eating time that should go to growing the business.\n\n"
             "We build systems that automate your entire operations layer - so you run more jobs "
-            "with less chaos.\n"
+            "with less chaos.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "Your landscaping business is growing. Your systems aren't keeping up.",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Growth in landscaping creates a specific problem - more clients, more crews, more "
-            "jobs, but the same manual systems trying to hold it all together.\n"
+            "jobs, but the same manual systems trying to hold it all together.\n\n"
             "That's where things break. Double bookings. Missed follow-ups. Invoices that go out "
-            "late.\n"
+            "late.\n\n"
             "We build custom apps and automation systems designed for field service businesses - "
-            "so your operations scale as fast as your revenue.\n"
+            "so your operations scale as fast as your revenue.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -349,23 +365,23 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Manual compliance processes are a liability",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "In government and defense operations, manual workflows don't just slow things down - "
-            "they create audit risk, compliance gaps, and accountability problems.\n"
-            "Every step that isn't logged, tracked, and attributable is a liability.\n"
+            "they create audit risk, compliance gaps, and accountability problems.\n\n"
+            "Every step that isn't logged, tracked, and attributable is a liability.\n\n"
             "We build secure automation systems with full audit trails - designed for high-stakes, "
-            "regulated environments where every action needs to be defensible.\n"
+            "regulated environments where every action needs to be defensible.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "Your team is spending mission-critical time on administrative work",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "The organizations we work with in government and defense have the same frustration - "
-            "highly skilled people doing work that systems should be doing.\n"
+            "highly skilled people doing work that systems should be doing.\n\n"
             "Reporting. Compliance tracking. Request processing. All manual. All pulling attention "
-            "from what matters.\n"
+            "from what matters.\n\n"
             "We build AI-assisted workflows and secure platforms that handle the administrative "
-            "layer - so your team focuses on mission-critical work.\n"
+            "layer - so your team focuses on mission-critical work.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -373,23 +389,23 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "Your engineers are building internal tools instead of your product",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Every tech company reaches the same inflection point - the internal tools, manual "
             "processes, and operational gaps start consuming engineering bandwidth that should go "
-            "to the core product.\n"
-            "That's expensive. And it compounds.\n"
+            "to the core product.\n\n"
+            "That's expensive. And it compounds.\n\n"
             "We build custom AI agents and automation systems that handle your internal operations "
-            "- so your engineers ship product, not internal tooling.\n"
+            "- so your engineers ship product, not internal tooling.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "The fastest tech teams automate their operations first",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "The technology companies that scale fastest aren't just building great products - "
-            "they're running lean, automated operations behind the scenes.\n"
-            "No manual reporting. No disconnected tools. No ops work eating engineering time.\n"
+            "they're running lean, automated operations behind the scenes.\n\n"
+            "No manual reporting. No disconnected tools. No ops work eating engineering time.\n\n"
             "We build the internal automation layer that lets your team move faster - AI agents, "
-            "workflow automation, and custom systems designed for technology companies.\n"
+            "workflow automation, and custom systems designed for technology companies.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -397,23 +413,23 @@ TEMPLATE_VARIANTS = {
         "A": _tpl(DEFAULT_A_SUBJECT, DEFAULT_A_BODY),
         "B": _tpl(
             "5 tools. No system. Sound familiar?",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most businesses we talk to aren't lacking tools - they're lacking a system that "
-            "connects them.\n"
+            "connects them.\n\n"
             "CRM here. Spreadsheet there. Email for everything else. And someone manually moving "
-            "data between all of it.\n"
+            "data between all of it.\n\n"
             "We build custom AI systems and automation workflows that replace that patchwork - one "
-            "connected operation that runs without manual intervention.\n"
+            "connected operation that runs without manual intervention.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
         "C": _tpl(
             "The hidden cost of manual operations",
-            "Hi {first_name},\n"
+            "Hi {first_name},\n\n"
             "Most businesses underestimate how much manual operations are actually costing them - "
-            "not just in time, but in errors, delays, and missed opportunities.\n"
-            "It doesn't show up on a P&L. But it's there every day.\n"
+            "not just in time, but in errors, delays, and missed opportunities.\n\n"
+            "It doesn't show up on a P&L. But it's there every day.\n\n"
             "We build custom automation systems, AI agents, and apps that remove that hidden cost "
-            "entirely - so your team operates faster with the same headcount.\n"
+            "entirely - so your team operates faster with the same headcount.\n\n"
             f"{CASE_STUDIES_CLOSE}",
         ),
     },
@@ -432,8 +448,9 @@ def unsubscribe_footer(base_url: str, email: str) -> str:
     token = encode_email_token(email)
     url = f"{base}/unsubscribe?e={token}"
     return (
-        "\n\n---\n"
-        "If this isn't relevant, you can unsubscribe here:\n"
+        "\n\n"
+        "---\n\n"
+        "If this isn't relevant, you can unsubscribe here:\n\n"
         f"{url}\n"
     )
 
@@ -840,6 +857,7 @@ def send_batch(args: argparse.Namespace) -> None:
             log_skip("duplicate_in_run")
             continue
         seen_emails.add(em_lower)
+        row = merge_contact_website_from_db(row, em_lower)
 
         if is_suppressed(em_lower, suppression_cache):
             log_skip("suppressed")
@@ -861,6 +879,7 @@ def send_batch(args: argparse.Namespace) -> None:
                         "owner_name": name,
                         "business_name": company,
                         "segment": segment,
+                        "website": (row.get("website") or "").strip(),
                     }
                 )
                 if pg_store.is_lead_status_blocked(cid):
@@ -1093,6 +1112,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         for email, row, _d1 in cands:
             if budget <= 0:
                 return
+            row = merge_contact_website_from_db(row, email)
             from_email, from_name = resolve_from_identity()
             sending_domain = sending_domain_from_from_email(from_email)
             sk = pre_send_gates(email, row, mail_kind, from_email, from_name, sending_domain)
@@ -1173,6 +1193,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         if em_lower in seen_init:
             continue
         seen_init.add(em_lower)
+        row = merge_contact_website_from_db(row, em_lower)
 
         company = (row.get("business_name") or "").strip()
         name = (row.get("owner_name") or "").strip()
@@ -1194,6 +1215,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                         "owner_name": name,
                         "business_name": company,
                         "segment": segment,
+                        "website": (row.get("website") or "").strip(),
                     }
                 )
                 if pg_store.is_lead_status_blocked(cid):
