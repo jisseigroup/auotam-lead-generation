@@ -2,7 +2,7 @@
 """
 Weekday EST scheduler for AUOTAM email sending agent.
 
-It wraps `email_agent.py send` and runs in a loop:
+It wraps `email_agent.py orchestrate` and runs in a loop:
 - Mon-Fri only
 - EST business-hour gate
 - Hourly pacing toward daily target
@@ -34,8 +34,16 @@ def now_est() -> datetime:
     return datetime.now(tz=EST)
 
 
-def is_window_open(start_hour: int, end_hour: int, now: datetime | None = None) -> bool:
+def is_window_open(
+    start_hour: int,
+    end_hour: int,
+    now: datetime | None = None,
+    *,
+    dry_run: bool = False,
+) -> bool:
     dt = now or now_est()
+    if dry_run:
+        return True
     if dt.weekday() >= 5:
         return False
     return start_hour <= dt.hour < end_hour
@@ -67,13 +75,15 @@ def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
     cmd = [
         "python3",
         "email_agent.py",
-        "send",
+        "orchestrate",
         "--input-csv",
         args.input_csv,
         "--log-csv",
         args.log_csv,
-        "--status-jsonl",
-        args.status_jsonl,
+        "--sequence-status-jsonl",
+        args.sequence_status_jsonl,
+        "--ses-message-status-jsonl",
+        args.ses_message_status_jsonl,
         "--daily-cap",
         str(args.daily_target),
         "--start-hour-est",
@@ -118,7 +128,9 @@ def scheduler_loop(args: argparse.Namespace) -> None:
 
     while True:
         current = now_est()
-        if not is_window_open(args.start_hour_est, args.end_hour_est, current):
+        if not is_window_open(
+            args.start_hour_est, args.end_hour_est, current, dry_run=args.dry_run
+        ):
             print(f"[{current.isoformat()}] Outside window. Sleeping {args.poll_interval_seconds}s.")
             time.sleep(seconds_until_next_check(args.poll_interval_seconds))
             continue
@@ -133,13 +145,20 @@ def scheduler_loop(args: argparse.Namespace) -> None:
         ceiling = float(
             os.getenv("COST_GUARD_CEILING_USD", str(args.cost_ceiling_usd))
         )
+        print(
+            f"[{current.isoformat()}] Cost guard check (ceiling=${ceiling:.2f}, "
+            f"disabled={args.disable_cost_guard})..."
+        )
         allowed, mtd_spend, _reason = session_cost_check(
             ceiling_usd=ceiling,
             log_path=cost_log,
             disabled=args.disable_cost_guard,
         )
+        spend_note = f"${mtd_spend:.2f}" if mtd_spend is not None else "unknown"
+        print(
+            f"[{current.isoformat()}] Cost guard: allowed={allowed}, MTD≈{spend_note}, reason={_reason!r}"
+        )
         if not allowed:
-            spend_note = f"${mtd_spend:.2f}" if mtd_spend is not None else "unknown"
             print(
                 f"[{current.isoformat()}] Sending paused by cost guard "
                 f"(MTD≈{spend_note}). Sleeping {args.poll_interval_seconds}s."
@@ -147,7 +166,11 @@ def scheduler_loop(args: argparse.Namespace) -> None:
             time.sleep(seconds_until_next_check(args.poll_interval_seconds))
             continue
 
-        this_run_cap = min(args.daily_target, already + per_hour)
+        # One-shot dry validation: process up to full daily target in a single subprocess.
+        if args.dry_run and args.once:
+            this_run_cap = args.daily_target
+        else:
+            this_run_cap = min(args.daily_target, already + per_hour)
         rc = run_send_once(args, per_run_cap=this_run_cap)
         if rc != 0:
             print(f"[{now_est().isoformat()}] Send run failed with exit code {rc}.")
@@ -166,7 +189,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run AUOTAM weekday sending scheduler")
     p.add_argument("--input-csv", required=True, help="Input contacts CSV")
     p.add_argument("--log-csv", default="data/logs/send_log.csv", help="Send log CSV path")
-    p.add_argument("--status-jsonl", default="data/events/status.jsonl", help="Status JSONL path")
+    p.add_argument(
+        "--ses-message-status-jsonl",
+        "--status-jsonl",
+        dest="ses_message_status_jsonl",
+        default=os.getenv("SES_MESSAGE_STATUS_JSONL", "data/events/status.jsonl"),
+        help="SES outbound message-id JSONL (--status-jsonl is an alias)",
+    )
+    p.add_argument(
+        "--sequence-status-jsonl",
+        default=os.getenv("SEQUENCE_STATUS_JSONL", "data/sequence/status.jsonl"),
+        help="Per-contact sequence state JSONL",
+    )
     p.add_argument("--daily-target", type=int, default=6000, help="Target sends per EST weekday")
     p.add_argument("--start-hour-est", type=int, default=9, help="Window start hour EST")
     p.add_argument("--end-hour-est", type=int, default=17, help="Window end hour EST")

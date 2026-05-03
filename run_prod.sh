@@ -29,6 +29,7 @@ fi
 : "${INPUT_CSV:=output/sba/all_businesses.csv}"
 : "${LOG_CSV:=data/logs/send_log.csv}"
 : "${STATUS_JSONL:=data/events/status.jsonl}"
+: "${SEQUENCE_STATUS_JSONL:=data/sequence/status.jsonl}"
 
 echo "Starting AUOTAM scheduler..."
 echo "CSV: ${INPUT_CSV}"
@@ -39,7 +40,8 @@ CMD=(
   python3 run_scheduler.py
   --input-csv "${INPUT_CSV}"
   --log-csv "${LOG_CSV}"
-  --status-jsonl "${STATUS_JSONL}"
+  --sequence-status-jsonl "${SEQUENCE_STATUS_JSONL}"
+  --ses-message-status-jsonl "${STATUS_JSONL}"
   --daily-target "${AUOTAM_DAILY_TARGET}"
   --start-hour-est "${AUOTAM_START_HOUR_EST}"
   --end-hour-est "${AUOTAM_END_HOUR_EST}"

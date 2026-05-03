@@ -33,7 +33,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from email.utils import formataddr
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -41,10 +41,20 @@ from zoneinfo import ZoneInfo
 
 from auotam.sendgrid_client import send_mail as sendgrid_send_mail
 from auotam.identities import pick_identity
+from auotam.dormant_list import append_dormant, is_dormant_cooldown_active
+from auotam.followup_templates import build_followup
+from auotam.sequence_status import (
+    DEFAULT_SEQUENCE_STATUS_PATH,
+    default_record,
+    load_sequence_state,
+    merge_list_flags_into_record,
+    parse_iso_date,
+    save_sequence_state,
+)
 from auotam.suppression import (
     DEFAULT_SUPPRESSION_DIR,
-    add_to_suppression,
     is_suppressed,
+    load_email_column_csv,
     load_suppression_lists,
     seed_suppression_files,
 )
@@ -62,6 +72,7 @@ LOG_FIELDS = [
     "name",
     "company",
     "segment",
+    "mail_kind",
     "template_variant",
     "sending_domain",
     "subject",
@@ -579,13 +590,137 @@ def append_log(log_path: Path, row: dict) -> None:
         writer.writerow(row)
 
 
+def sent_today_to_recipient(log_path: Path, email: str) -> bool:
+    """True if any successful send today to this address (any mail_kind)."""
+    if not log_path.exists():
+        return False
+    today = datetime.now(tz=EST).date().isoformat()
+    em = (email or "").strip().lower()
+    with log_path.open("r", encoding="utf-8", newline="") as fp:
+        reader = csv.DictReader(fp)
+        for row in reader:
+            if row.get("sent_date_est") != today or row.get("status") != "sent":
+                continue
+            if (row.get("email") or "").strip().lower() == em:
+                return True
+    return False
+
+
+def _send_single_message(
+    cfg: Config,
+    args: argparse.Namespace,
+    ses: Optional[object],
+    *,
+    from_email: str,
+    from_name: str,
+    sending_domain: str,
+    recipient_domain: str,
+    em_lower: str,
+    subject: str,
+    body_text: str,
+    log_path: Path,
+    ses_status_path: Path,
+    company: str,
+    name: str,
+    segment: str,
+    entity_detail_id: str,
+    uei: str,
+    mail_kind: str,
+    template_variant: str,
+    domain_counts: Dict[str, int],
+    ts_now: datetime,
+) -> Tuple[str, str, str]:
+    """
+    Perform one outbound send + log row.
+    Returns (status, message_id_or_empty, error_reason_or_empty).
+    On success, increments domain_counts for recipient_domain and may append SES message status JSONL.
+    """
+    message_id = ""
+    status = "sent"
+    reason = ""
+    try:
+        if args.dry_run:
+            message_id = f"dryrun-{int(time.time()*1000)}"
+        elif cfg.provider == "sendgrid":
+            message_id = sendgrid_send_mail(
+                api_key=cfg.sendgrid_api_key,
+                from_email=from_email,
+                from_name=from_name,
+                to_email=em_lower,
+                subject=subject,
+                body_text=body_text,
+                reply_to=cfg.reply_to,
+                categories=["auotam-outbound", segment or "universal", sending_domain, mail_kind],
+            )
+        else:
+            request = {
+                "Source": formataddr((from_name, from_email)),
+                "Destination": {"ToAddresses": [em_lower]},
+                "Message": {
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {"Text": {"Data": body_text, "Charset": "UTF-8"}},
+                },
+            }
+            if cfg.reply_to:
+                request["ReplyToAddresses"] = [cfg.reply_to]
+            if cfg.configuration_set:
+                request["ConfigurationSetName"] = cfg.configuration_set
+            response = ses.send_email(**request)
+            message_id = response.get("MessageId", "")
+            ses_status_path.parent.mkdir(parents=True, exist_ok=True)
+            with ses_status_path.open("a", encoding="utf-8") as sfp:
+                sfp.write(
+                    json.dumps(
+                        {
+                            "message_id": message_id,
+                            "to_email": em_lower,
+                            "sent_at_est": ts_now.isoformat(),
+                            "status": "sent",
+                            "opened": False,
+                            "bounced": False,
+                            "replied": False,
+                            "mail_kind": mail_kind,
+                        }
+                    )
+                    + "\n"
+                )
+        domain_counts[recipient_domain] = domain_counts.get(recipient_domain, 0) + 1
+    except Exception as exc:  # noqa: BLE001
+        status = "failed"
+        reason = str(exc)
+
+    append_log(
+        log_path,
+        {
+            "timestamp_est": ts_now.isoformat(),
+            "sent_date_est": ts_now.date().isoformat(),
+            "status": status,
+            "reason": reason,
+            "email": em_lower,
+            "name": name,
+            "company": company,
+            "segment": segment,
+            "mail_kind": mail_kind,
+            "template_variant": template_variant,
+            "sending_domain": sending_domain,
+            "subject": subject,
+            "message_id": message_id,
+            "entity_detail_id": entity_detail_id,
+            "uei": uei,
+        },
+    )
+    return status, message_id, reason
+
+
 def send_batch(args: argparse.Namespace) -> None:
+    """Email 1 (initial outreach) only — updates per-contact sequence state."""
     cfg = load_config(args)
     lock_from = bool(args.from_email or os.getenv("FROM_EMAIL") or os.getenv("AUOTAM_FROM_EMAIL"))
     input_csv = Path(args.input_csv)
     log_path = Path(args.log_csv)
-    status_path = Path(args.status_jsonl)
-    status_path.parent.mkdir(parents=True, exist_ok=True)
+    seq_path = Path(args.sequence_status_jsonl or os.getenv("SEQUENCE_STATUS_JSONL", str(DEFAULT_SEQUENCE_STATUS_PATH)))
+    ses_status_path = Path(args.status_jsonl)
+    ses_status_path.parent.mkdir(parents=True, exist_ok=True)
     seed_suppression_files(cfg.suppression_dir)
 
     if cfg.provider == "sendgrid" and not args.dry_run and not cfg.sendgrid_api_key:
@@ -597,7 +732,7 @@ def send_batch(args: argparse.Namespace) -> None:
     if not input_csv.exists():
         raise SystemExit(f"Input CSV not found: {input_csv}")
 
-    if not in_sending_window(cfg.start_hour_est, cfg.end_hour_est):
+    if not args.dry_run and not in_sending_window(cfg.start_hour_est, cfg.end_hour_est):
         raise SystemExit("Outside allowed sending window (Mon-Fri, EST business hours).")
 
     already_sent = sent_today_count(log_path)
@@ -622,9 +757,15 @@ def send_batch(args: argparse.Namespace) -> None:
         if rotated:
             return rotated
         return cfg.from_email, cfg.from_name
+
     suppression_cache: Set[str] = load_suppression_lists(cfg.suppression_dir)
+    unsub_set = load_email_column_csv(cfg.suppression_dir / "unsubscribes.csv")
+    bounce_set = load_email_column_csv(cfg.suppression_dir / "bounces.csv")
+    state = load_sequence_state(seq_path)
     domain_counts = load_domain_sent_today(log_path)
     seen_emails: Set[str] = set()
+    today_d: date = datetime.now(tz=EST).date()
+    today_iso = today_d.isoformat()
 
     sent = 0
     skipped = 0
@@ -656,6 +797,7 @@ def send_batch(args: argparse.Namespace) -> None:
                     "name": name,
                     "company": company,
                     "segment": segment,
+                    "mail_kind": "initial",
                     "template_variant": "",
                     "sending_domain": sending_domain,
                     "subject": "",
@@ -683,91 +825,367 @@ def send_batch(args: argparse.Namespace) -> None:
             log_skip("role_address")
             continue
 
+        if sent_today_to_recipient(log_path, em_lower):
+            log_skip("already_sent_today")
+            continue
+
+        st = state.get(em_lower, default_record(em_lower))
+        merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+        if st.get("replied"):
+            log_skip("replied")
+            continue
+        if st.get("unsubscribed") or st.get("bounced"):
+            log_skip("unsubscribed_or_bounced")
+            continue
+
+        if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d) and not (st.get("email_1_sent") or ""):
+            log_skip("dormant_cooldown")
+            continue
+
+        if (st.get("email_1_sent") or "").strip():
+            if not (st.get("email_4_sent") or "").strip():
+                log_skip("sequence_in_progress")
+                continue
+            if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d):
+                log_skip("dormant_cooldown")
+                continue
+            st = default_record(em_lower)
+            merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+
         recipient_domain = em_lower.split("@", 1)[1]
         if domain_counts.get(recipient_domain, 0) >= cfg.max_per_day_per_domain:
             log_skip("recipient_domain_cap")
             continue
 
         email_content = build_email(row, to_email=em_lower, base_url=cfg.base_url)
-        message_id = ""
-        status = "sent"
-        reason = ""
-
-        try:
-            if args.dry_run:
-                message_id = f"dryrun-{int(time.time()*1000)}"
-            elif cfg.provider == "sendgrid":
-                message_id = sendgrid_send_mail(
-                    api_key=cfg.sendgrid_api_key,
-                    from_email=from_email,
-                    from_name=from_name,
-                    to_email=em_lower,
-                    subject=email_content["subject"],
-                    body_text=email_content["body"],
-                    reply_to=cfg.reply_to,
-                    categories=["auotam-outbound", segment or "universal", sending_domain],
-                )
-            else:
-                request = {
-                    "Source": formataddr((from_name, from_email)),
-                    "Destination": {"ToAddresses": [em_lower]},
-                    "Message": {
-                        "Subject": {"Data": email_content["subject"], "Charset": "UTF-8"},
-                        "Body": {"Text": {"Data": email_content["body"], "Charset": "UTF-8"}},
-                    },
-                }
-                if cfg.reply_to:
-                    request["ReplyToAddresses"] = [cfg.reply_to]
-                if cfg.configuration_set:
-                    request["ConfigurationSetName"] = cfg.configuration_set
-
-                response = ses.send_email(**request)
-                message_id = response.get("MessageId", "")
-
-                with status_path.open("a", encoding="utf-8") as sfp:
-                    sfp.write(
-                        json.dumps(
-                            {
-                                "message_id": message_id,
-                                "to_email": em_lower,
-                                "sent_at_est": ts_now.isoformat(),
-                                "status": "sent",
-                                "opened": False,
-                                "bounced": False,
-                                "replied": False,
-                            }
-                        )
-                        + "\n"
-                    )
-
+        status, _mid, _reason = _send_single_message(
+            cfg,
+            args,
+            ses,
+            from_email=from_email,
+            from_name=from_name,
+            sending_domain=sending_domain,
+            recipient_domain=recipient_domain,
+            em_lower=em_lower,
+            subject=email_content["subject"],
+            body_text=email_content["body"],
+            log_path=log_path,
+            ses_status_path=ses_status_path,
+            company=company,
+            name=name,
+            segment=segment,
+            entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+            uei=str(row.get("uei", "") or ""),
+            mail_kind="initial",
+            template_variant=email_content.get("variant", ""),
+            domain_counts=domain_counts,
+            ts_now=ts_now,
+        )
+        if status == "sent":
             sent += 1
-            domain_counts[recipient_domain] = domain_counts.get(recipient_domain, 0) + 1
-        except Exception as exc:  # noqa: BLE001
-            status = "failed"
-            reason = str(exc)
+            st["email_1_sent"] = today_iso
+            st["last_sent_date_est"] = today_iso
+            state[em_lower] = st
+            save_sequence_state(seq_path, state)
+        time.sleep(sleep_seconds)
 
+    print(f"Completed. sent={sent}, skipped={skipped}, log={log_path}")
+
+
+def orchestrate_batch(args: argparse.Namespace) -> None:
+    """
+    One session: follow-ups 2→3→4 (by day since Email 1), then Email 1 for new/re-eligible contacts.
+    Shared daily cap, same window / throttles / suppression as send.
+    """
+    cfg = load_config(args)
+    lock_from = bool(args.from_email or os.getenv("FROM_EMAIL") or os.getenv("AUOTAM_FROM_EMAIL"))
+    input_csv = Path(args.input_csv)
+    log_path = Path(args.log_csv)
+    seq_path = Path(args.sequence_status_jsonl)
+    ses_status_path = Path(args.ses_message_status_jsonl)
+    ses_status_path.parent.mkdir(parents=True, exist_ok=True)
+    seq_path.parent.mkdir(parents=True, exist_ok=True)
+    seed_suppression_files(cfg.suppression_dir)
+
+    if cfg.provider == "sendgrid" and not args.dry_run and not cfg.sendgrid_api_key:
+        raise SystemExit("Missing SendGrid API key. Set SENDGRID_API_KEY or --sendgrid-api-key.")
+    if not cfg.from_email and not args.dry_run:
+        raise SystemExit("Missing sender email. Set FROM_EMAIL / AUOTAM_FROM_EMAIL / --from-email.")
+    if not input_csv.exists():
+        raise SystemExit(f"Input CSV not found: {input_csv}")
+    if not args.dry_run and not in_sending_window(cfg.start_hour_est, cfg.end_hour_est):
+        raise SystemExit("Outside allowed sending window (Mon-Fri, EST business hours).")
+
+    budget = max(0, cfg.daily_cap - sent_today_count(log_path))
+    if budget == 0:
+        print(f"Daily cap reached ({cfg.daily_cap}). Nothing to send.")
+        return
+    print(f"Orchestrate: daily budget remaining={budget}")
+
+    ses = None
+    if not args.dry_run and cfg.provider == "ses":
+        try:
+            import boto3  # type: ignore
+        except ImportError as exc:
+            raise SystemExit("boto3 is required for SES live sending. Install with: pip3 install boto3") from exc
+        ses = boto3.client("ses", region_name=cfg.aws_region)
+
+    def resolve_from_identity() -> Tuple[str, str]:
+        if lock_from:
+            return cfg.from_email, cfg.from_name
+        rotated = pick_identity()
+        if rotated:
+            return rotated
+        return cfg.from_email, cfg.from_name
+
+    suppression_cache: Set[str] = load_suppression_lists(cfg.suppression_dir)
+    unsub_set = load_email_column_csv(cfg.suppression_dir / "unsubscribes.csv")
+    bounce_set = load_email_column_csv(cfg.suppression_dir / "bounces.csv")
+    state = load_sequence_state(seq_path)
+    for _em, st in list(state.items()):
+        merge_list_flags_into_record(st, _em, unsub_set, bounce_set)
+
+    csv_by_email: Dict[str, dict] = {}
+    for row in read_csv_rows(input_csv):
+        e = (row.get("email") or "").strip().lower()
+        if is_valid_email(e):
+            csv_by_email[e] = row
+
+    domain_counts = load_domain_sent_today(log_path)
+    today_d: date = datetime.now(tz=EST).date()
+    today_iso = today_d.isoformat()
+    sleep_seconds = 1.0 / max(0.1, cfg.sends_per_second)
+    sent = 0
+    skipped = 0
+    seen_today: Set[str] = set()
+
+    def log_skip_orchestrate(
+        em: str,
+        row: Optional[dict],
+        reason: str,
+        mail_kind: str,
+        from_email: str,
+        from_name: str,
+        sending_domain: str,
+    ) -> None:
+        nonlocal skipped
+        skipped += 1
+        r = row or {}
+        ts_now = datetime.now(tz=EST)
         append_log(
             log_path,
             {
                 "timestamp_est": ts_now.isoformat(),
                 "sent_date_est": ts_now.date().isoformat(),
-                "status": status,
+                "status": "skipped",
                 "reason": reason,
-                "email": em_lower,
-                "name": name,
-                "company": company,
-                "segment": segment,
-                "template_variant": email_content.get("variant", ""),
+                "email": em,
+                "name": (r.get("owner_name") or "").strip(),
+                "company": (r.get("business_name") or "").strip(),
+                "segment": (r.get("segment") or "").strip().lower(),
+                "mail_kind": mail_kind,
+                "template_variant": "",
                 "sending_domain": sending_domain,
-                "subject": email_content["subject"],
-                "message_id": message_id,
-                "entity_detail_id": row.get("entity_detail_id", ""),
-                "uei": row.get("uei", ""),
+                "subject": "",
+                "message_id": "",
+                "entity_detail_id": str(r.get("entity_detail_id", "") or ""),
+                "uei": str(r.get("uei", "") or ""),
             },
         )
+
+    def pre_send_gates(
+        em_lower: str,
+        row: dict,
+        mail_kind: str,
+        from_email: str,
+        from_name: str,
+        sending_domain: str,
+    ) -> Optional[str]:
+        """Return skip reason or None if OK to send."""
+        if not is_valid_email(em_lower):
+            return "invalid_email"
+        if is_suppressed(em_lower, suppression_cache):
+            return "suppressed"
+        if is_role_address(em_lower):
+            return "role_address"
+        if sent_today_to_recipient(log_path, em_lower) or em_lower in seen_today:
+            return "already_sent_today"
+        dom = em_lower.split("@", 1)[1]
+        if domain_counts.get(dom, 0) >= cfg.max_per_day_per_domain:
+            return "recipient_domain_cap"
+        return None
+
+    def run_followup_step(
+        step: int,
+        min_days_since_e1: int,
+        prev_sent_key: Optional[str],
+        sent_key: str,
+        mail_kind: str,
+    ) -> None:
+        nonlocal budget, sent, skipped
+        cands: List[Tuple[str, dict, date]] = []
+        for email, st in state.items():
+            merge_list_flags_into_record(st, email, unsub_set, bounce_set)
+            if st.get("replied") or st.get("unsubscribed") or st.get("bounced"):
+                continue
+            if (st.get("last_sent_date_est") or "") == today_iso:
+                continue
+            d1 = parse_iso_date(st.get("email_1_sent"))
+            if not d1:
+                continue
+            if (today_d - d1).days < min_days_since_e1:
+                continue
+            if (st.get(sent_key) or "").strip():
+                continue
+            if prev_sent_key and not (st.get(prev_sent_key) or "").strip():
+                continue
+            row = csv_by_email.get(email)
+            if not row:
+                continue
+            cands.append((email, row, d1))
+        cands.sort(key=lambda x: x[2])
+        for email, row, _d1 in cands:
+            if budget <= 0:
+                return
+            from_email, from_name = resolve_from_identity()
+            sending_domain = sending_domain_from_from_email(from_email)
+            sk = pre_send_gates(email, row, mail_kind, from_email, from_name, sending_domain)
+            if sk:
+                log_skip_orchestrate(email, row, sk, mail_kind, from_email, from_name, sending_domain)
+                continue
+            fn = split_first_name(row.get("owner_name", ""))
+            co = (row.get("business_name") or "").strip() or "your business"
+            tpl = build_followup(step, fn, co)
+            body = tpl["body"] + unsubscribe_footer(cfg.base_url, email)
+            ts_now = datetime.now(tz=EST)
+            dom = email.split("@", 1)[1]
+            status, _mid, _err = _send_single_message(
+                cfg,
+                args,
+                ses,
+                from_email=from_email,
+                from_name=from_name,
+                sending_domain=sending_domain,
+                recipient_domain=dom,
+                em_lower=email,
+                subject=tpl["subject"],
+                body_text=body,
+                log_path=log_path,
+                ses_status_path=ses_status_path,
+                company=co,
+                name=(row.get("owner_name") or "").strip(),
+                segment=(row.get("segment") or "").strip().lower(),
+                entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+                uei=str(row.get("uei", "") or ""),
+                mail_kind=mail_kind,
+                template_variant="",
+                domain_counts=domain_counts,
+                ts_now=ts_now,
+            )
+            if status == "sent":
+                budget -= 1
+                sent += 1
+                seen_today.add(email)
+                st = state.setdefault(email, default_record(email))
+                merge_list_flags_into_record(st, email, unsub_set, bounce_set)
+                st[sent_key] = today_iso
+                st["last_sent_date_est"] = today_iso
+                if step == 4 and not st.get("replied"):
+                    append_dormant(email, today_d, cfg.suppression_dir)
+                    st["dormant"] = True
+                save_sequence_state(seq_path, state)
+            time.sleep(sleep_seconds)
+
+    run_followup_step(2, 5, None, "email_2_sent", "followup_2")
+    run_followup_step(3, 10, "email_2_sent", "email_3_sent", "followup_3")
+    run_followup_step(4, 16, "email_3_sent", "email_4_sent", "followup_4")
+
+    seen_init: Set[str] = set()
+    for row in read_csv_rows(input_csv):
+        if budget <= 0:
+            break
+        to_email = (row.get("email") or "").strip()
+        if not is_valid_email(to_email):
+            continue
+        em_lower = to_email.lower()
+        if em_lower in seen_init:
+            continue
+        seen_init.add(em_lower)
+
+        company = (row.get("business_name") or "").strip()
+        name = (row.get("owner_name") or "").strip()
+        segment = (row.get("segment") or "").strip().lower()
+        ts_now = datetime.now(tz=EST)
+        from_email, from_name = resolve_from_identity()
+        sending_domain = sending_domain_from_from_email(from_email)
+
+        sk = pre_send_gates(em_lower, row, "initial", from_email, from_name, sending_domain)
+        if sk:
+            log_skip_orchestrate(em_lower, row, sk, "initial", from_email, from_name, sending_domain)
+            continue
+
+        st = state.get(em_lower, default_record(em_lower))
+        merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+        if st.get("replied"):
+            log_skip_orchestrate(em_lower, row, "replied", "initial", from_email, from_name, sending_domain)
+            continue
+        if st.get("unsubscribed") or st.get("bounced"):
+            log_skip_orchestrate(
+                em_lower, row, "unsubscribed_or_bounced", "initial", from_email, from_name, sending_domain
+            )
+            continue
+        if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d) and not (st.get("email_1_sent") or ""):
+            log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
+            continue
+        if (st.get("email_1_sent") or "").strip():
+            if not (st.get("email_4_sent") or "").strip():
+                log_skip_orchestrate(
+                    em_lower, row, "sequence_in_progress", "initial", from_email, from_name, sending_domain
+                )
+                continue
+            if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d):
+                log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
+                continue
+            st = default_record(em_lower)
+            merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+
+        recipient_domain = em_lower.split("@", 1)[1]
+        email_content = build_email(row, to_email=em_lower, base_url=cfg.base_url)
+        status, _mid, _reason = _send_single_message(
+            cfg,
+            args,
+            ses,
+            from_email=from_email,
+            from_name=from_name,
+            sending_domain=sending_domain,
+            recipient_domain=recipient_domain,
+            em_lower=em_lower,
+            subject=email_content["subject"],
+            body_text=email_content["body"],
+            log_path=log_path,
+            ses_status_path=ses_status_path,
+            company=company,
+            name=name,
+            segment=segment,
+            entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+            uei=str(row.get("uei", "") or ""),
+            mail_kind="initial",
+            template_variant=email_content.get("variant", ""),
+            domain_counts=domain_counts,
+            ts_now=ts_now,
+        )
+        if status == "sent":
+            budget -= 1
+            sent += 1
+            seen_today.add(em_lower)
+            st = state.setdefault(em_lower, default_record(em_lower))
+            merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+            st["email_1_sent"] = today_iso
+            st["last_sent_date_est"] = today_iso
+            save_sequence_state(seq_path, state)
         time.sleep(sleep_seconds)
 
-    print(f"Completed. sent={sent}, skipped={skipped}, log={log_path}")
+    print(f"Orchestrate completed. sent={sent}, skipped={skipped}, log={log_path}, sequence={seq_path}")
 
 
 def ingest_events(args: argparse.Namespace) -> None:
@@ -844,8 +1262,13 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--log-csv", default="data/logs/send_log.csv", help="Send log CSV path")
     send.add_argument(
         "--status-jsonl",
-        default="output/email/status.jsonl",
-        help="Message status JSONL path (for event tracking)",
+        default="data/events/status.jsonl",
+        help="SES message-id JSONL (event tracking), not sequence state",
+    )
+    send.add_argument(
+        "--sequence-status-jsonl",
+        default=os.getenv("SEQUENCE_STATUS_JSONL", str(DEFAULT_SEQUENCE_STATUS_PATH)),
+        help="Per-contact 4-email sequence state (JSONL)",
     )
     send.add_argument(
         "--provider",
@@ -876,11 +1299,47 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--sends-per-second", type=float, default=1.0, help="Rate limit (max sends/sec)")
     send.add_argument("--dry-run", action="store_true", help="Render and log only, do not call provider")
 
+    orch = sub.add_parser(
+        "orchestrate",
+        help="Run follow-ups 2–4 then initial sends under one shared daily cap",
+    )
+    orch.add_argument("--input-csv", required=True, help="Input contacts CSV path")
+    orch.add_argument("--log-csv", default="data/logs/send_log.csv", help="Send log CSV path")
+    orch.add_argument(
+        "--sequence-status-jsonl",
+        default=os.getenv("SEQUENCE_STATUS_JSONL", str(DEFAULT_SEQUENCE_STATUS_PATH)),
+        help="Per-contact sequence state JSONL",
+    )
+    orch.add_argument(
+        "--ses-message-status-jsonl",
+        default="data/events/status.jsonl",
+        help="SES outbound message-id JSONL",
+    )
+    orch.add_argument(
+        "--provider",
+        default="",
+        help="ses (default) or sendgrid",
+    )
+    orch.add_argument("--sendgrid-api-key", default="", help="SendGrid API key")
+    orch.add_argument("--base-url", default="", help="Public base URL for unsubscribe links")
+    orch.add_argument("--suppression-dir", default="", help="Suppression CSV directory")
+    orch.add_argument("--max-per-day-per-domain", type=int, default=50)
+    orch.add_argument("--aws-region", default="", help="AWS region")
+    orch.add_argument("--from-email", default="", help="From address")
+    orch.add_argument("--from-name", default="Govind Chauhan", help="From display name")
+    orch.add_argument("--reply-to", default="", help="Reply-To inbox")
+    orch.add_argument("--configuration-set", default="", help="SES configuration set")
+    orch.add_argument("--start-hour-est", type=int, default=9)
+    orch.add_argument("--end-hour-est", type=int, default=17)
+    orch.add_argument("--daily-cap", type=int, default=6000)
+    orch.add_argument("--sends-per-second", type=float, default=1.0)
+    orch.add_argument("--dry-run", action="store_true")
+
     ingest = sub.add_parser("ingest-events", help="Ingest SES SNS event JSONL")
     ingest.add_argument("--sns-jsonl", required=True, help="SNS payload JSONL path")
     ingest.add_argument(
         "--status-jsonl",
-        default="output/email/status.jsonl",
+        default="data/events/status.jsonl",
         help="Message status JSONL path",
     )
 
@@ -892,6 +1351,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "send":
         send_batch(args)
+        return
+    if args.command == "orchestrate":
+        orchestrate_batch(args)
         return
     if args.command == "ingest-events":
         ingest_events(args)

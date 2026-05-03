@@ -99,5 +99,27 @@ def add_to_suppression(email: str, event_type: str, base_dir: Path | None = None
 def seed_suppression_files(base_dir: Path | None = None) -> None:
     """Create empty CSVs with headers if missing."""
     base = base_dir or DEFAULT_SUPPRESSION_DIR
-    for name in ("unsubscribes.csv", "bounces.csv", "complaints.csv"):
-        _ensure_file(base / name)
+    for name in ("unsubscribes.csv", "bounces.csv", "complaints.csv", "dormant.csv"):
+        p = base / name
+        if name == "dormant.csv":
+            if not p.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with p.open("w", encoding="utf-8", newline="") as fp:
+                    writer = csv.writer(fp)
+                    writer.writerow(["email", "dormant_since"])
+            continue
+        _ensure_file(p)
+
+
+def load_email_column_csv(path: Path, column: str = "email") -> Set[str]:
+    """Load a single-column or named-column email set from CSV."""
+    out: Set[str] = set()
+    if not path.exists():
+        return out
+    with path.open("r", encoding="utf-8", newline="") as fp:
+        reader = csv.DictReader(fp)
+        for row in reader:
+            e = (row.get(column) or row.get("email") or "").strip().lower()
+            if e and "@" in e:
+                out.add(e)
+    return out
