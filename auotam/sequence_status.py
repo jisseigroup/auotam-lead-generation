@@ -1,5 +1,5 @@
 """
-Per-contact sequence state (JSONL: one JSON object per line, keyed by email).
+Per-contact sequence state: JSONL file (legacy) or sequence_status table when DATABASE_URL is set.
 
 Tracks Email 1–4 send dates (EST calendar dates), flags, and last send date
 for the one-email-per-contact-per-day rule.
@@ -35,6 +35,10 @@ def default_record(email: str) -> Dict[str, Any]:
 
 
 def load_sequence_state(path: Path | None = None) -> Dict[str, Dict[str, Any]]:
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.load_sequence_state_dict()
     p = path or DEFAULT_SEQUENCE_STATUS_PATH
     out: Dict[str, Dict[str, Any]] = {}
     if not p.exists():
@@ -55,6 +59,11 @@ def load_sequence_state(path: Path | None = None) -> Dict[str, Dict[str, Any]]:
 
 
 def save_sequence_state(path: Path, state: Dict[str, Dict[str, Any]]) -> None:
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        pg_store.save_sequence_state_dict(state)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(state[k], sort_keys=True) for k in sorted(state.keys())]
     fd, tmp = tempfile.mkstemp(prefix="seq_", suffix=".jsonl", dir=str(path.parent))

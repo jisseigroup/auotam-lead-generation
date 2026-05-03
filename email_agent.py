@@ -54,8 +54,8 @@ from auotam.sequence_status import (
 from auotam.suppression import (
     DEFAULT_SUPPRESSION_DIR,
     is_suppressed,
-    load_email_column_csv,
     load_suppression_lists,
+    load_unsub_and_bounce_sets,
     seed_suppression_files,
 )
 
@@ -449,6 +449,10 @@ def is_role_address(email: str) -> bool:
 
 def load_domain_sent_today(log_path: Path) -> Dict[str, int]:
     """Count successful sends today per recipient domain (from log email column)."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.domain_sent_today_est()
     counts: Dict[str, int] = {}
     if not log_path.exists():
         return counts
@@ -568,6 +572,10 @@ def read_csv_rows(path: Path) -> Iterable[dict]:
 
 
 def sent_today_count(log_path: Path) -> int:
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.sent_today_count_est()
     if not log_path.exists():
         return 0
     today = datetime.now(tz=EST).date().isoformat()
@@ -581,6 +589,11 @@ def sent_today_count(log_path: Path) -> int:
 
 
 def append_log(log_path: Path, row: dict) -> None:
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        pg_store.insert_email_log_from_agent_row(row)
+        return
     log_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not log_path.exists()
     with log_path.open("a", encoding="utf-8", newline="") as fp:
@@ -592,6 +605,10 @@ def append_log(log_path: Path, row: dict) -> None:
 
 def sent_today_to_recipient(log_path: Path, email: str) -> bool:
     """True if any successful send today to this address (any mail_kind)."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.recipient_sent_today_est(email)
     if not log_path.exists():
         return False
     today = datetime.now(tz=EST).date().isoformat()
@@ -667,23 +684,26 @@ def _send_single_message(
                 request["ConfigurationSetName"] = cfg.configuration_set
             response = ses.send_email(**request)
             message_id = response.get("MessageId", "")
-            ses_status_path.parent.mkdir(parents=True, exist_ok=True)
-            with ses_status_path.open("a", encoding="utf-8") as sfp:
-                sfp.write(
-                    json.dumps(
-                        {
-                            "message_id": message_id,
-                            "to_email": em_lower,
-                            "sent_at_est": ts_now.isoformat(),
-                            "status": "sent",
-                            "opened": False,
-                            "bounced": False,
-                            "replied": False,
-                            "mail_kind": mail_kind,
-                        }
+            from auotam import pg_store
+
+            if not pg_store.use_database():
+                ses_status_path.parent.mkdir(parents=True, exist_ok=True)
+                with ses_status_path.open("a", encoding="utf-8") as sfp:
+                    sfp.write(
+                        json.dumps(
+                            {
+                                "message_id": message_id,
+                                "to_email": em_lower,
+                                "sent_at_est": ts_now.isoformat(),
+                                "status": "sent",
+                                "opened": False,
+                                "bounced": False,
+                                "replied": False,
+                                "mail_kind": mail_kind,
+                            }
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
         domain_counts[recipient_domain] = domain_counts.get(recipient_domain, 0) + 1
     except Exception as exc:  # noqa: BLE001
         status = "failed"
@@ -732,6 +752,11 @@ def send_batch(args: argparse.Namespace) -> None:
     if not input_csv.exists():
         raise SystemExit(f"Input CSV not found: {input_csv}")
 
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        pg_store.maybe_bootstrap_contacts_from_csv(input_csv)
+
     if not args.dry_run and not in_sending_window(cfg.start_hour_est, cfg.end_hour_est):
         raise SystemExit("Outside allowed sending window (Mon-Fri, EST business hours).")
 
@@ -759,8 +784,7 @@ def send_batch(args: argparse.Namespace) -> None:
         return cfg.from_email, cfg.from_name
 
     suppression_cache: Set[str] = load_suppression_lists(cfg.suppression_dir)
-    unsub_set = load_email_column_csv(cfg.suppression_dir / "unsubscribes.csv")
-    bounce_set = load_email_column_csv(cfg.suppression_dir / "bounces.csv")
+    unsub_set, bounce_set = load_unsub_and_bounce_sets(cfg.suppression_dir)
     state = load_sequence_state(seq_path)
     domain_counts = load_domain_sent_today(log_path)
     seen_emails: Set[str] = set()
@@ -828,6 +852,23 @@ def send_batch(args: argparse.Namespace) -> None:
         if sent_today_to_recipient(log_path, em_lower):
             log_skip("already_sent_today")
             continue
+
+        if pg_store.use_database():
+            try:
+                cid = pg_store.get_or_create_contact_id_for_row(
+                    {
+                        "email": em_lower,
+                        "owner_name": name,
+                        "business_name": company,
+                        "segment": segment,
+                    }
+                )
+                if pg_store.is_lead_status_blocked(cid):
+                    log_skip("lead_won_or_not_interested")
+                    continue
+            except ValueError:
+                log_skip("invalid_email")
+                continue
 
         st = state.get(em_lower, default_record(em_lower))
         merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
@@ -913,6 +954,12 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         raise SystemExit("Missing sender email. Set FROM_EMAIL / AUOTAM_FROM_EMAIL / --from-email.")
     if not input_csv.exists():
         raise SystemExit(f"Input CSV not found: {input_csv}")
+
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        pg_store.maybe_bootstrap_contacts_from_csv(input_csv)
+
     if not args.dry_run and not in_sending_window(cfg.start_hour_est, cfg.end_hour_est):
         raise SystemExit("Outside allowed sending window (Mon-Fri, EST business hours).")
 
@@ -939,8 +986,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         return cfg.from_email, cfg.from_name
 
     suppression_cache: Set[str] = load_suppression_lists(cfg.suppression_dir)
-    unsub_set = load_email_column_csv(cfg.suppression_dir / "unsubscribes.csv")
-    bounce_set = load_email_column_csv(cfg.suppression_dir / "bounces.csv")
+    unsub_set, bounce_set = load_unsub_and_bounce_sets(cfg.suppression_dir)
     state = load_sequence_state(seq_path)
     for _em, st in list(state.items()):
         merge_list_flags_into_record(st, _em, unsub_set, bounce_set)
@@ -1053,6 +1099,22 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             if sk:
                 log_skip_orchestrate(email, row, sk, mail_kind, from_email, from_name, sending_domain)
                 continue
+            if pg_store.use_database():
+                try:
+                    cid = pg_store.get_or_create_contact_id_for_row(row)
+                    if pg_store.is_lead_status_blocked(cid):
+                        log_skip_orchestrate(
+                            email,
+                            row,
+                            "lead_won_or_not_interested",
+                            mail_kind,
+                            from_email,
+                            from_name,
+                            sending_domain,
+                        )
+                        continue
+                except ValueError:
+                    continue
             fn = split_first_name(row.get("owner_name", ""))
             co = (row.get("business_name") or "").strip() or "your business"
             tpl = build_followup(step, fn, co)
@@ -1124,6 +1186,30 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             log_skip_orchestrate(em_lower, row, sk, "initial", from_email, from_name, sending_domain)
             continue
 
+        if pg_store.use_database():
+            try:
+                cid = pg_store.get_or_create_contact_id_for_row(
+                    {
+                        "email": em_lower,
+                        "owner_name": name,
+                        "business_name": company,
+                        "segment": segment,
+                    }
+                )
+                if pg_store.is_lead_status_blocked(cid):
+                    log_skip_orchestrate(
+                        em_lower,
+                        row,
+                        "lead_won_or_not_interested",
+                        "initial",
+                        from_email,
+                        from_name,
+                        sending_domain,
+                    )
+                    continue
+            except ValueError:
+                continue
+
         st = state.get(em_lower, default_record(em_lower))
         merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
         if st.get("replied"):
@@ -1193,11 +1279,18 @@ def ingest_events(args: argparse.Namespace) -> None:
     Ingest SES SNS event lines (one JSON per line) and update status jsonl.
     Expected eventType values include: Delivery, Bounce, Complaint, Open, Click.
     """
+    from auotam import pg_store
+
     source = Path(args.sns_jsonl)
     status_path = Path(args.status_jsonl)
 
     if not source.exists():
         raise SystemExit(f"SNS JSONL file not found: {source}")
+
+    if pg_store.use_database():
+        n = pg_store.ingest_ses_events_from_jsonl(source)
+        print(f"Ingested events. Updated email_log rows (approx): {n}")
+        return
 
     statuses: Dict[str, dict] = {}
     if status_path.exists():

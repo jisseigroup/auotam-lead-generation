@@ -18,10 +18,15 @@ def dormant_csv_path(base_dir: Path) -> Path:
 
 def load_dormant_since(base_dir: Path) -> dict[str, date]:
     """email -> dormant_since date (first occurrence wins if duplicates)."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.load_dormant_since_map()
+
     path = dormant_csv_path(base_dir)
-    out: dict[str, date] = {}
+    out_csv: dict[str, date] = {}
     if not path.exists():
-        return out
+        return out_csv
     with path.open("r", encoding="utf-8", newline="") as fp:
         reader = csv.DictReader(fp)
         for row in reader:
@@ -33,13 +38,17 @@ def load_dormant_since(base_dir: Path) -> dict[str, date]:
                 d = date.fromisoformat(str(ds).strip()[:10])
             except ValueError:
                 continue
-            if em not in out:
-                out[em] = d
-    return out
+            if em not in out_csv:
+                out_csv[em] = d
+    return out_csv
 
 
 def is_dormant_cooldown_active(email: str, base_dir: Path, today: date) -> bool:
     """True if contact is within 90-day dormant window after last Email 4."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.is_dormant_cooldown_active_db(email, today)
     m = load_dormant_since(base_dir)
     em = email.strip().lower()
     if em not in m:
@@ -48,6 +57,12 @@ def is_dormant_cooldown_active(email: str, base_dir: Path, today: date) -> bool:
 
 
 def append_dormant(email: str, dormant_since: date, base_dir: Path) -> None:
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        pg_store.append_dormant_db(email, dormant_since)
+        return
+
     path = dormant_csv_path(base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():

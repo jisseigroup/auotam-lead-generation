@@ -50,6 +50,10 @@ def is_window_open(
 
 
 def sent_today(log_csv: Path) -> int:
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.sent_today_count_est()
     if not log_csv.exists():
         return 0
     today = now_est().date().isoformat()

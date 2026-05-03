@@ -1,8 +1,7 @@
 """
 Suppression lists: unsubscribes, bounces, complaints.
 
-CSV files under data/suppression/ with a single column: email
-(lowercased). Thread-safe append via file locks.
+CSV files under data/suppression/ (legacy), or suppression table when DATABASE_URL is set.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import csv
 import fcntl
 import os
 from pathlib import Path
-from typing import Iterable, Set
+from typing import Iterable, Set, Tuple
 
 DEFAULT_SUPPRESSION_DIR = Path("data/suppression")
 
@@ -37,7 +36,11 @@ def _ensure_file(path: Path) -> None:
 
 
 def load_suppression_lists(base_dir: Path | None = None) -> Set[str]:
-    """Load all suppressed emails (union of three lists)."""
+    """Load all suppressed emails (union of unsubscribe / bounce / complaint)."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.load_suppression_email_union()
     base = base_dir or DEFAULT_SUPPRESSION_DIR
     emails: Set[str] = set()
     for name in ("unsubscribes.csv", "bounces.csv", "complaints.csv"):
@@ -53,6 +56,21 @@ def load_suppression_lists(base_dir: Path | None = None) -> Set[str]:
     return emails
 
 
+def load_unsub_and_bounce_sets(base_dir: Path | None = None) -> Tuple[Set[str], Set[str]]:
+    """
+    Match legacy split: unsubscribes.csv -> unsub_set, bounces.csv -> bounce_set
+    (complaints are not merged into sequence flags; they remain in suppression union only).
+    """
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return pg_store.load_unsub_and_bounce_email_sets()
+    base = base_dir or DEFAULT_SUPPRESSION_DIR
+    unsub = load_email_column_csv(base / "unsubscribes.csv")
+    bounce = load_email_column_csv(base / "bounces.csv")
+    return unsub, bounce
+
+
 def is_suppressed(email: str, cache: Set[str] | None = None, base_dir: Path | None = None) -> bool:
     normalized = (email or "").strip().lower()
     if not normalized:
@@ -64,16 +82,30 @@ def is_suppressed(email: str, cache: Set[str] | None = None, base_dir: Path | No
 
 def add_to_suppression(email: str, event_type: str, base_dir: Path | None = None) -> None:
     """
-    Append one email to the appropriate CSV.
+    Record suppression (CSV legacy or PostgreSQL).
 
     event_type: unsubscribe | bounce | dropped | spamreport | complaint
     """
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        kind = (event_type or "").strip().lower()
+        if kind in ("unsubscribe", "unsubscribed"):
+            reason = "unsubscribe"
+        elif kind in ("bounce", "bounced", "dropped"):
+            reason = "bounce"
+        elif kind in ("spamreport", "complaint", "spam_complaint"):
+            reason = "complaint"
+        else:
+            reason = "bounce"
+        pg_store.add_suppression(email, reason)
+        return
+
     base = base_dir or DEFAULT_SUPPRESSION_DIR
     kind = (event_type or "").strip().lower()
     if kind in ("unsubscribe", "unsubscribed"):
         path = _path_for("unsubscribe", base)
     elif kind in ("bounce", "bounced", "dropped"):
-        # SendGrid "dropped" often indicates policy/block; treat as bounce list for suppression.
         path = _path_for("bounce", base)
     elif kind in ("spamreport", "complaint", "spam_complaint"):
         path = _path_for("complaint", base)
@@ -97,7 +129,11 @@ def add_to_suppression(email: str, event_type: str, base_dir: Path | None = None
 
 
 def seed_suppression_files(base_dir: Path | None = None) -> None:
-    """Create empty CSVs with headers if missing."""
+    """Create empty CSVs with headers if missing (file mode only)."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        return
     base = base_dir or DEFAULT_SUPPRESSION_DIR
     for name in ("unsubscribes.csv", "bounces.csv", "complaints.csv", "dormant.csv"):
         p = base / name
