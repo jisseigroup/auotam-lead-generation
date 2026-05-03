@@ -102,23 +102,24 @@ def main() -> None:
             id, email, first_name, last_name, business_name, phone, address,
             city, state, country, industry, website, created_at
         ) VALUES %s
-        ON CONFLICT (email) DO NOTHING
+        ON CONFLICT (email) DO UPDATE SET
+            website = COALESCE(NULLIF(EXCLUDED.website, ''), contacts.website)
     """
 
     # One INSERT statement cannot repeat the same email twice; dedupe within each batch by email.
     batch_by_email: Dict[str, Tuple[Any, ...]] = {}
     csv_rows = 0
     skipped_invalid = 0
-    inserted_total = 0
+    affected_total = 0
 
     def flush_batch(cur: Any) -> None:
-        nonlocal inserted_total, batch_by_email
+        nonlocal affected_total, batch_by_email
         if not batch_by_email:
             return
         rows = list(batch_by_email.values())
         execute_values(cur, insert_sql, rows, page_size=len(rows))
         rc = cur.rowcount
-        inserted_total += int(rc) if rc is not None and rc >= 0 else 0
+        affected_total += int(rc) if rc is not None and rc >= 0 else 0
         batch_by_email.clear()
 
     conn = psycopg2.connect(db_url)
@@ -139,7 +140,7 @@ def main() -> None:
                     if csv_rows % 10_000 == 0:
                         print(
                             f"Progress: {csv_rows:,} CSV rows read; "
-                            f"rows inserted so far (ON CONFLICT excluded): {inserted_total:,}"
+                            f"rows affected so far (insert + website update): {affected_total:,}"
                         )
             flush_batch(cur)
             conn.commit()
@@ -148,8 +149,8 @@ def main() -> None:
 
     print(
         f"Done. CSV rows read: {csv_rows:,}; skipped (no email): {skipped_invalid:,}; "
-        f"insert attempts committed in batches (rowcount sum): {inserted_total:,}. "
-        f"Duplicates were skipped via ON CONFLICT (email) DO NOTHING."
+        f"rows affected in batches (rowcount sum, insert + update): {affected_total:,}. "
+        f"Existing emails: website updated from CSV when non-empty; blanks keep contacts.website."
     )
 
 
