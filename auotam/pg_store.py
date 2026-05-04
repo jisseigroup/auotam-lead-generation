@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -88,9 +89,7 @@ def get_contact_id_by_email_cur(cur, email: str) -> Optional[str]:
         return None
     cur.execute("SELECT id FROM contacts WHERE lower(email) = %s", (em,))
     row = cur.fetchone()
-    if not row or row[0] is None:
-        return None
-    return str(row[0])
+    return str(row[0]) if row else None
 
 
 def get_or_create_contact_id_for_row(row: Dict[str, Any]) -> str:
@@ -553,15 +552,17 @@ def insert_email_log_from_agent_row(row: Dict[str, Any]) -> None:
             cid = get_or_create_contact_id_cur(cur, agent_row)
             status = (row.get("status") or "").strip().lower() or "unknown"
             mid = (row.get("message_id") or "").strip() or None
+            log_id = str(uuid.uuid4())
             cur.execute(
                 """
                 INSERT INTO email_log (
-                    contact_id, email_type, subject, template_variant, sent_at,
+                    id, contact_id, email_type, subject, template_variant, sent_at,
                     message_id, status, opened_at, clicked_at, replied_at, direction
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'outbound')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'outbound')
                 """,
                 (
+                    log_id,
                     cid,
                     (row.get("mail_kind") or "unknown")[:64],
                     (row.get("subject") or "")[:2000],
