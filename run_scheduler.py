@@ -29,6 +29,38 @@ from auotam.cost_guard import session_cost_check
 
 EST = ZoneInfo("America/New_York")
 
+_REPO_ROOT = Path(__file__).resolve().parent
+
+
+def parse_dotenv_file(path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines from a .env file into a dict (no dependencies)."""
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def subprocess_env_with_repo_dotenv() -> dict[str, str]:
+    """Merge current process env with repo-root .env so subprocesses see DATABASE_URL etc."""
+    dot = parse_dotenv_file(_REPO_ROOT / ".env")
+    return {**os.environ, **dot}
+
 
 def now_est() -> datetime:
     return datetime.now(tz=EST)
@@ -118,7 +150,8 @@ def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
     cmd[cmd.index("--daily-cap") + 1] = str(per_run_cap)
 
     print(f"[{now_est().isoformat()}] Executing send run...")
-    result = subprocess.run(cmd, check=False)
+    child_env = subprocess_env_with_repo_dotenv()
+    result = subprocess.run(cmd, check=False, env=child_env, cwd=str(_REPO_ROOT))
     return result.returncode
 
 

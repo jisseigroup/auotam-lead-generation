@@ -16,6 +16,7 @@ Features:
 - Pre-send validation (role addresses, invalid, duplicates)
 - Rate limiting
 - Send log + optional status JSONL
+- First successful send of each EST day: optional mirror to govind@auotam.com with [TEST COPY] subject (see DAILY_TEST_COPY_*; tracked beside --log-csv).
 
 Usage examples:
   python3 email_agent.py send --input-csv output/sba/all_businesses.csv
@@ -640,6 +641,97 @@ def sent_today_to_recipient(log_path: Path, email: str) -> bool:
     return False
 
 
+# First successful production send of each EST calendar day: BCC-style copy to this inbox (not logged).
+DAILY_TEST_COPY_TO = "govind@auotam.com"
+DAILY_TEST_COPY_SUBJECT_PREFIX = "[TEST COPY] "
+DAILY_TEST_COPY_FLAG_FILE = ".email_agent_daily_test_copy_date"
+
+
+def _daily_test_copy_flag_path(log_path: Path) -> Path:
+    return log_path.parent / DAILY_TEST_COPY_FLAG_FILE
+
+
+def _daily_test_copy_already_sent_for_date(log_path: Path, sent_date_est: str) -> bool:
+    p = _daily_test_copy_flag_path(log_path)
+    try:
+        return p.read_text(encoding="utf-8").strip() == sent_date_est
+    except OSError:
+        return False
+
+
+def _mark_daily_test_copy_sent_for_date(log_path: Path, sent_date_est: str) -> None:
+    p = _daily_test_copy_flag_path(log_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(sent_date_est + "\n", encoding="utf-8")
+
+
+def maybe_send_daily_test_copy_after_production_send(
+    cfg: Config,
+    args: argparse.Namespace,
+    ses: Optional[object],
+    *,
+    log_path: Path,
+    ses_status_path: Path,
+    domain_counts: Dict[str, int],
+    today_iso: str,
+    from_email: str,
+    from_name: str,
+    sending_domain: str,
+    subject: str,
+    body_text: str,
+    company: str,
+    name: str,
+    segment: str,
+    entity_detail_id: str,
+    uei: str,
+    mail_kind: str,
+    template_variant: str,
+) -> None:
+    """
+    Once per EST day: after a real production send succeeds, send the same body to DAILY_TEST_COPY_TO
+    with subject prefixed by DAILY_TEST_COPY_SUBJECT_PREFIX. Uses _send_single_message (SendGrid or SES).
+    Does not append to send log or domain counts. Tracked via a one-line date file beside the log CSV.
+    """
+    if args.dry_run:
+        return
+    if _daily_test_copy_already_sent_for_date(log_path, today_iso):
+        return
+    test_to = DAILY_TEST_COPY_TO.strip().lower()
+    if not test_to or "@" not in test_to:
+        return
+    dom = test_to.split("@", 1)[1]
+    ts_now = datetime.now(tz=EST)
+    st, _mid, err = _send_single_message(
+        cfg,
+        args,
+        ses,
+        from_email=from_email,
+        from_name=from_name,
+        sending_domain=sending_domain,
+        recipient_domain=dom,
+        em_lower=test_to,
+        subject=f"{DAILY_TEST_COPY_SUBJECT_PREFIX}{subject}",
+        body_text=body_text,
+        log_path=log_path,
+        ses_status_path=ses_status_path,
+        company=company,
+        name=name,
+        segment=segment,
+        entity_detail_id=entity_detail_id,
+        uei=uei,
+        mail_kind="daily_test_copy",
+        template_variant=template_variant,
+        domain_counts=domain_counts,
+        ts_now=ts_now,
+        record_log_and_domain=False,
+    )
+    if st == "sent":
+        _mark_daily_test_copy_sent_for_date(log_path, today_iso)
+        print(f"Daily test copy sent to {test_to} (mirrors first send of {today_iso}, {mail_kind}).")
+    else:
+        print(f"Daily test copy to {test_to} failed (will retry on next successful send today): {err}")
+
+
 def _send_single_message(
     cfg: Config,
     args: argparse.Namespace,
@@ -663,11 +755,13 @@ def _send_single_message(
     template_variant: str,
     domain_counts: Dict[str, int],
     ts_now: datetime,
+    record_log_and_domain: bool = True,
 ) -> Tuple[str, str, str]:
     """
     Perform one outbound send + log row.
     Returns (status, message_id_or_empty, error_reason_or_empty).
     On success, increments domain_counts for recipient_domain and may append SES message status JSONL.
+    Set record_log_and_domain=False for internal copies (e.g. daily test mirror) so caps/log stay clean.
     """
     message_id = ""
     status = "sent"
@@ -703,7 +797,7 @@ def _send_single_message(
             message_id = response.get("MessageId", "")
             from auotam import pg_store
 
-            if not pg_store.use_database():
+            if record_log_and_domain and not pg_store.use_database():
                 ses_status_path.parent.mkdir(parents=True, exist_ok=True)
                 with ses_status_path.open("a", encoding="utf-8") as sfp:
                     sfp.write(
@@ -721,31 +815,33 @@ def _send_single_message(
                         )
                         + "\n"
                     )
-        domain_counts[recipient_domain] = domain_counts.get(recipient_domain, 0) + 1
+        if record_log_and_domain:
+            domain_counts[recipient_domain] = domain_counts.get(recipient_domain, 0) + 1
     except Exception as exc:  # noqa: BLE001
         status = "failed"
         reason = str(exc)
 
-    append_log(
-        log_path,
-        {
-            "timestamp_est": ts_now.isoformat(),
-            "sent_date_est": ts_now.date().isoformat(),
-            "status": status,
-            "reason": reason,
-            "email": em_lower,
-            "name": name,
-            "company": company,
-            "segment": segment,
-            "mail_kind": mail_kind,
-            "template_variant": template_variant,
-            "sending_domain": sending_domain,
-            "subject": subject,
-            "message_id": message_id,
-            "entity_detail_id": entity_detail_id,
-            "uei": uei,
-        },
-    )
+    if record_log_and_domain:
+        append_log(
+            log_path,
+            {
+                "timestamp_est": ts_now.isoformat(),
+                "sent_date_est": ts_now.date().isoformat(),
+                "status": status,
+                "reason": reason,
+                "email": em_lower,
+                "name": name,
+                "company": company,
+                "segment": segment,
+                "mail_kind": mail_kind,
+                "template_variant": template_variant,
+                "sending_domain": sending_domain,
+                "subject": subject,
+                "message_id": message_id,
+                "entity_detail_id": entity_detail_id,
+                "uei": uei,
+            },
+        )
     return status, message_id, reason
 
 
@@ -947,6 +1043,27 @@ def send_batch(args: argparse.Namespace) -> None:
             st["last_sent_date_est"] = today_iso
             state[em_lower] = st
             save_sequence_state(seq_path, state)
+            maybe_send_daily_test_copy_after_production_send(
+                cfg,
+                args,
+                ses,
+                log_path=log_path,
+                ses_status_path=ses_status_path,
+                domain_counts=domain_counts,
+                today_iso=today_iso,
+                from_email=from_email,
+                from_name=from_name,
+                sending_domain=sending_domain,
+                subject=email_content["subject"],
+                body_text=email_content["body"],
+                company=company,
+                name=name,
+                segment=segment,
+                entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+                uei=str(row.get("uei", "") or ""),
+                mail_kind="initial",
+                template_variant=email_content.get("variant", "") or "",
+            )
         time.sleep(sleep_seconds)
 
     print(f"Completed. sent={sent}, skipped={skipped}, log={log_path}")
@@ -1176,6 +1293,27 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                     append_dormant(email, today_d, cfg.suppression_dir)
                     st["dormant"] = True
                 save_sequence_state(seq_path, state)
+                maybe_send_daily_test_copy_after_production_send(
+                    cfg,
+                    args,
+                    ses,
+                    log_path=log_path,
+                    ses_status_path=ses_status_path,
+                    domain_counts=domain_counts,
+                    today_iso=today_iso,
+                    from_email=from_email,
+                    from_name=from_name,
+                    sending_domain=sending_domain,
+                    subject=tpl["subject"],
+                    body_text=body,
+                    company=co,
+                    name=(row.get("owner_name") or "").strip(),
+                    segment=(row.get("segment") or "").strip().lower(),
+                    entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+                    uei=str(row.get("uei", "") or ""),
+                    mail_kind=mail_kind,
+                    template_variant="",
+                )
             time.sleep(sleep_seconds)
 
     run_followup_step(2, 5, None, "email_2_sent", "followup_2")
@@ -1291,6 +1429,27 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             st["email_1_sent"] = today_iso
             st["last_sent_date_est"] = today_iso
             save_sequence_state(seq_path, state)
+            maybe_send_daily_test_copy_after_production_send(
+                cfg,
+                args,
+                ses,
+                log_path=log_path,
+                ses_status_path=ses_status_path,
+                domain_counts=domain_counts,
+                today_iso=today_iso,
+                from_email=from_email,
+                from_name=from_name,
+                sending_domain=sending_domain,
+                subject=email_content["subject"],
+                body_text=email_content["body"],
+                company=company,
+                name=name,
+                segment=segment,
+                entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+                uei=str(row.get("uei", "") or ""),
+                mail_kind="initial",
+                template_variant=email_content.get("variant", "") or "",
+            )
         time.sleep(sleep_seconds)
 
     print(f"Orchestrate completed. sent={sent}, skipped={skipped}, log={log_path}, sequence={seq_path}")
@@ -1462,6 +1621,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    print(f"[MODE] {'DB' if os.environ.get('DATABASE_URL') else 'CSV'}")
     parser = build_parser()
     args = parser.parse_args()
     if args.command == "send":
