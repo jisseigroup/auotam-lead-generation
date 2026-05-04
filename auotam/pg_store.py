@@ -556,19 +556,21 @@ def insert_email_log_from_agent_row(row: Dict[str, Any]) -> None:
                 status = "sent"
             mid = (row.get("message_id") or "").strip() or None
             log_id = str(uuid.uuid4())
+            body = (row.get("body") or row.get("body_text") or "").strip() or None
             cur.execute(
                 """
                 INSERT INTO email_log (
-                    id, contact_id, email_type, subject, template_variant, sent_at,
+                    id, contact_id, email_type, subject, body, template_variant, sent_at,
                     message_id, status, opened_at, clicked_at, replied_at, direction
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'outbound')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'outbound')
                 """,
                 (
                     log_id,
                     cid,
                     (row.get("mail_kind") or "unknown")[:64],
                     (row.get("subject") or "")[:2000],
+                    body,
                     (row.get("template_variant") or "")[:32],
                     sent_at,
                     mid,
