@@ -70,7 +70,7 @@ def _split_name(owner_name: str) -> Tuple[str, str]:
 def _load_unsub_bounce_sets_cur(cur) -> Tuple[Set[str], Set[str]]:
     unsub: Set[str] = set()
     bounce: Set[str] = set()
-    cur.execute("SELECT lower(email), lower(coalesce(reason, '')) FROM suppression")
+    cur.execute("SELECT lower(email), lower(coalesce(reason::text, '')) FROM suppression")
     for em, reason in cur.fetchall():
         if not em:
             continue
