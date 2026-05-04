@@ -465,6 +465,7 @@ def append_dormant_db(email: str, dormant_since: date) -> None:
 
 
 def sent_today_count_est() -> int:
+    """Count successful lead-gen sequence sends logged today (EST), from email_log only."""
     today = _est_today()
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -473,6 +474,7 @@ def sent_today_count_est() -> int:
                 SELECT COUNT(*) FROM email_log
                 WHERE direction = 'outbound'
                   AND status = 'sent'
+                  AND email_type IN ('initial', 'followup_2', 'followup_3', 'followup_4')
                   AND (sent_at AT TIME ZONE 'America/New_York')::date = %s
                 """,
                 (today,),
@@ -482,25 +484,34 @@ def sent_today_count_est() -> int:
 
 
 def recipient_sent_today_est(email: str) -> bool:
+    """
+    True if this contact already has a successful initial send logged for the current EST calendar day.
+
+    Mirrors: SELECT count(*) FROM email_log WHERE contact_id = ... AND sent_at is today (EST)
+    AND email_type = 'initial' — if count > 0, skip another initial today.
+    """
     em = (email or "").strip().lower()
+    if not em:
+        return False
     today = _est_today()
     with get_connection() as conn:
         with conn.cursor() as cur:
+            cid = get_contact_id_by_email_cur(cur, em)
+            if cid is None:
+                return False
             cur.execute(
                 """
-                SELECT EXISTS (
-                    SELECT 1 FROM email_log el
-                    JOIN contacts c ON c.id = el.contact_id
-                    WHERE lower(c.email) = %s
-                      AND el.direction = 'outbound'
-                      AND el.status = 'sent'
-                      AND (el.sent_at AT TIME ZONE 'America/New_York')::date = %s
-                )
+                SELECT COUNT(*) FROM email_log
+                WHERE contact_id = %s
+                  AND email_type = 'initial'
+                  AND direction = 'outbound'
+                  AND status = 'sent'
+                  AND (sent_at AT TIME ZONE 'America/New_York')::date = %s
                 """,
-                (em, today),
+                (cid, today),
             )
-            row = cur.fetchone()
-            return bool(row and row[0])
+            (n,) = cur.fetchone()
+            return int(n or 0) > 0
 
 
 def domain_sent_today_est() -> Dict[str, int]:
@@ -515,6 +526,7 @@ def domain_sent_today_est() -> Dict[str, int]:
                 JOIN contacts c ON c.id = el.contact_id
                 WHERE el.direction = 'outbound'
                   AND el.status = 'sent'
+                  AND el.email_type IN ('initial', 'followup_2', 'followup_3', 'followup_4')
                   AND (el.sent_at AT TIME ZONE 'America/New_York')::date = %s
                 GROUP BY 1
                 """,

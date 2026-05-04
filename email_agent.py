@@ -469,8 +469,9 @@ def is_role_address(email: str) -> bool:
 def load_domain_sent_today(log_path: Path) -> Dict[str, int]:
     """Count successful sends today per recipient domain (from log email column)."""
     from auotam import pg_store
+    from auotam.db import database_url
 
-    if pg_store.use_database():
+    if database_url():
         return pg_store.domain_sent_today_est()
     counts: Dict[str, int] = {}
     if not log_path.exists():
@@ -592,8 +593,9 @@ def read_csv_rows(path: Path) -> Iterable[dict]:
 
 def sent_today_count(log_path: Path) -> int:
     from auotam import pg_store
+    from auotam.db import database_url
 
-    if pg_store.use_database():
+    if database_url():
         return pg_store.sent_today_count_est()
     if not log_path.exists():
         return 0
@@ -623,10 +625,16 @@ def append_log(log_path: Path, row: dict) -> None:
 
 
 def sent_today_to_recipient(log_path: Path, email: str) -> bool:
-    """True if any successful send today to this address (any mail_kind)."""
-    from auotam import pg_store
+    """
+    True if this recipient should be skipped for another send today.
 
-    if pg_store.use_database():
+    When DATABASE_URL is set, uses email_log (initial only, EST calendar day) via pg_store;
+    otherwise scans the CSV log for any successful send today (any mail_kind).
+    """
+    from auotam import pg_store
+    from auotam.db import database_url
+
+    if database_url():
         return pg_store.recipient_sent_today_est(email)
     if not log_path.exists():
         return False

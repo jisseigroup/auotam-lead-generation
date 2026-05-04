@@ -83,8 +83,9 @@ def is_window_open(
 
 def sent_today(log_csv: Path) -> int:
     from auotam import pg_store
+    from auotam.db import database_url
 
-    if pg_store.use_database():
+    if database_url():
         return pg_store.sent_today_count_est()
     if not log_csv.exists():
         return 0
