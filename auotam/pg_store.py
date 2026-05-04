@@ -205,7 +205,7 @@ def is_lead_status_blocked(contact_id: int) -> bool:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT lower(coalesce(status, '')) FROM lead_status WHERE contact_id = %s",
+                "SELECT lower(coalesce(status::text, '')) FROM lead_status WHERE contact_id = %s",
                 (contact_id,),
             )
             row = cur.fetchone()
@@ -254,7 +254,7 @@ def load_sequence_state_dict() -> Dict[str, Dict[str, Any]]:
             )
             replied_ids: Set[int] = {int(r[0]) for r in cur.fetchall() if r and r[0] is not None}
             cur.execute(
-                "SELECT contact_id FROM lead_status WHERE lower(coalesce(status, '')) = 'replied'"
+                "SELECT contact_id FROM lead_status WHERE lower(coalesce(status::text, '')) = 'replied'"
             )
             replied_ids |= {int(r[0]) for r in cur.fetchall() if r and r[0] is not None}
             cur.execute(
