@@ -82,16 +82,18 @@ def _load_unsub_bounce_sets_cur(cur) -> Tuple[Set[str], Set[str]]:
     return unsub, bounce
 
 
-def get_contact_id_by_email_cur(cur, email: str) -> Optional[int]:
+def get_contact_id_by_email_cur(cur, email: str) -> Optional[str]:
     em = (email or "").strip().lower()
     if not em:
         return None
     cur.execute("SELECT id FROM contacts WHERE lower(email) = %s", (em,))
     row = cur.fetchone()
-    return int(row[0]) if row else None
+    if not row or row[0] is None:
+        return None
+    return str(row[0])
 
 
-def get_or_create_contact_id_for_row(row: Dict[str, Any]) -> int:
+def get_or_create_contact_id_for_row(row: Dict[str, Any]) -> str:
     """Resolve contacts.id for an agent/CSV row (opens one transaction)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -113,7 +115,7 @@ def select_contact_website_by_email(email: str) -> str:
             return (r[0] or "").strip() if r else ""
 
 
-def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> int:
+def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> str:
     email = (row.get("email") or "").strip().lower()
     if not email or "@" not in email:
         raise ValueError("row must include valid email")
@@ -145,7 +147,7 @@ def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> int:
         ),
     )
     (new_id,) = cur.fetchone()
-    return int(new_id)
+    return str(new_id)
 
 
 def maybe_bootstrap_contacts_from_csv(csv_path: Path) -> None:
@@ -201,7 +203,7 @@ def maybe_bootstrap_contacts_from_csv(csv_path: Path) -> None:
                 )
 
 
-def is_lead_status_blocked(contact_id: int) -> bool:
+def is_lead_status_blocked(contact_id: str) -> bool:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -252,11 +254,11 @@ def load_sequence_state_dict() -> Dict[str, Dict[str, Any]]:
             cur.execute(
                 "SELECT DISTINCT contact_id FROM email_log WHERE replied_at IS NOT NULL"
             )
-            replied_ids: Set[int] = {int(r[0]) for r in cur.fetchall() if r and r[0] is not None}
+            replied_ids: Set[str] = {str(r[0]) for r in cur.fetchall() if r and r[0] is not None}
             cur.execute(
                 "SELECT contact_id FROM lead_status WHERE lower(coalesce(status::text, '')) = 'replied'"
             )
-            replied_ids |= {int(r[0]) for r in cur.fetchall() if r and r[0] is not None}
+            replied_ids |= {str(r[0]) for r in cur.fetchall() if r and r[0] is not None}
             cur.execute(
                 """
                 SELECT
@@ -290,7 +292,7 @@ def load_sequence_state_dict() -> Dict[str, Dict[str, Any]]:
                 em = (em or "").strip().lower()
                 if not em:
                     continue
-                replied = int(cid) in replied_ids
+                replied = str(cid) in replied_ids
                 out[em] = {
                     "email": em,
                     "email_1_sent": _row_to_iso_date(e1),
