@@ -563,9 +563,18 @@ def insert_email_log_from_agent_row(row: Dict[str, Any]) -> None:
         with conn.cursor() as cur:
             cid = get_or_create_contact_id_cur(cur, agent_row)
             status = (row.get("status") or "").strip().lower() or "unknown"
-            valid_statuses = {"sent", "bounced", "opened", "clicked", "replied"}
+            valid_statuses = {
+                "sent",
+                "bounced",
+                "opened",
+                "clicked",
+                "replied",
+                "skipped",
+                "failed",
+            }
             if status not in valid_statuses:
-                status = "sent"
+                # Do not coerce to sent — that inflated SES vs DB metrics (e.g. skip rows).
+                status = "skipped"
             mid = (row.get("message_id") or "").strip() or None
             log_id = str(uuid.uuid4())
             body = (row.get("body") or row.get("body_text") or "").strip() or None
