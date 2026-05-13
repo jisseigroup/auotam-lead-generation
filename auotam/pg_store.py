@@ -34,8 +34,18 @@ def use_database() -> bool:
     return bool(database_url())
 
 
-def _est_today() -> date:
-    return datetime.now(tz=EST).date()
+def _est_day_bounds(now: Optional[datetime] = None) -> Tuple[datetime, datetime]:
+    """
+    Half-open [start, end) for the current America/New_York calendar day as absolute instants.
+
+    Used for daily-cap / domain counts against `timestamptz` so we never rely on UTC midnight
+    or ambiguous `date AT TIME ZONE` interpretations in PostgreSQL.
+    """
+    dt = (now or datetime.now(tz=EST)).astimezone(EST)
+    day = dt.date()
+    start = datetime.combine(day, datetime.min.time(), tzinfo=EST)
+    end = start + timedelta(days=1)
+    return start, end
 
 
 def _parse_date(val: Any) -> Optional[date]:
@@ -466,7 +476,7 @@ def append_dormant_db(email: str, dormant_since: date) -> None:
 
 def sent_today_count_est() -> int:
     """Count successful lead-gen sequence sends logged today (EST), from email_log only."""
-    today = _est_today()
+    start, end = _est_day_bounds()
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -475,9 +485,9 @@ def sent_today_count_est() -> int:
                 WHERE direction = 'outbound'
                   AND status = 'sent'
                   AND email_type IN ('initial', 'followup_2', 'followup_3', 'followup_4')
-                  AND (sent_at AT TIME ZONE 'America/New_York')::date = %s
+                  AND sent_at >= %s AND sent_at < %s
                 """,
-                (today,),
+                (start, end),
             )
             (n,) = cur.fetchone()
             return int(n or 0)
@@ -493,7 +503,7 @@ def recipient_sent_today_est(email: str) -> bool:
     em = (email or "").strip().lower()
     if not em:
         return False
-    today = _est_today()
+    start, end = _est_day_bounds()
     with get_connection() as conn:
         with conn.cursor() as cur:
             cid = get_contact_id_by_email_cur(cur, em)
@@ -506,16 +516,16 @@ def recipient_sent_today_est(email: str) -> bool:
                   AND email_type = 'initial'
                   AND direction = 'outbound'
                   AND status = 'sent'
-                  AND (sent_at AT TIME ZONE 'America/New_York')::date = %s
+                  AND sent_at >= %s AND sent_at < %s
                 """,
-                (cid, today),
+                (cid, start, end),
             )
             (n,) = cur.fetchone()
             return int(n or 0) > 0
 
 
 def domain_sent_today_est() -> Dict[str, int]:
-    today = _est_today()
+    start, end = _est_day_bounds()
     counts: Dict[str, int] = {}
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -527,10 +537,10 @@ def domain_sent_today_est() -> Dict[str, int]:
                 WHERE el.direction = 'outbound'
                   AND el.status = 'sent'
                   AND el.email_type IN ('initial', 'followup_2', 'followup_3', 'followup_4')
-                  AND (el.sent_at AT TIME ZONE 'America/New_York')::date = %s
+                  AND el.sent_at >= %s AND el.sent_at < %s
                 GROUP BY 1
                 """,
-                (today,),
+                (start, end),
             )
             for dom, n in cur.fetchall():
                 if dom:
