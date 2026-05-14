@@ -69,6 +69,12 @@ def _row_to_iso_date(val: Any) -> str:
     return d.isoformat() if d else ""
 
 
+def _latest_sequence_sent_iso(*vals: Any) -> str:
+    """Latest calendar day among sequence step sends (not CRM last_communication)."""
+    dates = [d for v in vals if (d := _parse_date(v))]
+    return max(dates).isoformat() if dates else ""
+
+
 def _split_name(owner_name: str) -> Tuple[str, str]:
     parts = (owner_name or "").strip().split(None, 1)
     if not parts:
@@ -276,7 +282,6 @@ def load_sequence_state_dict() -> Dict[str, Dict[str, Any]]:
                     s.email_2_sent,
                     s.email_3_sent,
                     s.email_4_sent,
-                    s.last_communication,
                     s.sequence_complete,
                     s.dormant,
                     s.dormant_until,
@@ -292,7 +297,6 @@ def load_sequence_state_dict() -> Dict[str, Dict[str, Any]]:
                     e2,
                     e3,
                     e4,
-                    last_comm,
                     seq_complete,
                     dormant,
                     dormant_until,
@@ -313,7 +317,7 @@ def load_sequence_state_dict() -> Dict[str, Dict[str, Any]]:
                     "bounced": em in bounce,
                     "dormant": bool(dormant),
                     "lead_score": "cold",
-                    "last_sent_date_est": _row_to_iso_date(last_comm),
+                    "last_sent_date_est": _latest_sequence_sent_iso(e1, e2, e3, e4),
                     "sequence_complete": bool(seq_complete),
                     "dormant_until": _row_to_iso_date(dormant_until),
                 }
