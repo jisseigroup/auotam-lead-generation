@@ -528,6 +528,33 @@ def recipient_sent_today_est(email: str) -> bool:
             return int(n or 0) > 0
 
 
+def emails_with_initial_sent_today_est() -> Set[str]:
+    """
+    Lowercased recipient emails that already have a successful *initial* send today (EST),
+    matching recipient_sent_today_est. Used to avoid per-contact DB round-trips in orchestrate.
+    """
+    start, end = _est_day_bounds()
+    out: Set[str] = set()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT lower(c.email)
+                FROM email_log el
+                JOIN contacts c ON c.id = el.contact_id
+                WHERE el.email_type = 'initial'
+                  AND el.direction = 'outbound'
+                  AND el.status = 'sent'
+                  AND el.sent_at >= %s AND el.sent_at < %s
+                """,
+                (start, end),
+            )
+            for (em,) in cur.fetchall():
+                if em:
+                    out.add(str(em).strip().lower())
+    return out
+
+
 def domain_sent_today_est() -> Dict[str, int]:
     start, end = _est_day_bounds()
     counts: Dict[str, int] = {}
@@ -552,66 +579,75 @@ def domain_sent_today_est() -> Dict[str, int]:
     return counts
 
 
-def insert_email_log_from_agent_row(row: Dict[str, Any]) -> None:
-    """Append one logical send-log row (matches legacy CSV columns)."""
-    email = (row.get("email") or "").strip().lower()
-    if not email:
-        return
+def _sent_at_from_agent_row(row: Dict[str, Any]) -> datetime:
     ts = row.get("timestamp_est") or datetime.now(tz=EST).isoformat()
     try:
         sent_at = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         sent_at = datetime.now(tz=EST)
     if sent_at.tzinfo is None:
-        sent_at = sent_at.replace(tzinfo=EST)
-    else:
-        sent_at = sent_at.astimezone(EST)
+        return sent_at.replace(tzinfo=EST)
+    return sent_at.astimezone(EST)
 
-    agent_row = {
-        "email": email,
-        "owner_name": row.get("name") or "",
-        "business_name": row.get("company") or "",
-        "segment": row.get("segment") or "",
+
+def insert_email_log_from_agent_rows(rows: List[Dict[str, Any]]) -> None:
+    """Append many send-log rows in one DB transaction (one connection)."""
+    if not rows:
+        return
+    valid_statuses = {
+        "sent",
+        "bounced",
+        "opened",
+        "clicked",
+        "replied",
+        "skipped",
+        "failed",
     }
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cid = get_or_create_contact_id_cur(cur, agent_row)
-            status = (row.get("status") or "").strip().lower() or "unknown"
-            valid_statuses = {
-                "sent",
-                "bounced",
-                "opened",
-                "clicked",
-                "replied",
-                "skipped",
-                "failed",
-            }
-            if status not in valid_statuses:
-                # Do not coerce to sent — that inflated SES vs DB metrics (e.g. skip rows).
-                status = "skipped"
-            mid = (row.get("message_id") or "").strip() or None
-            log_id = str(uuid.uuid4())
-            body = (row.get("body") or row.get("body_text") or "").strip() or None
-            cur.execute(
-                """
-                INSERT INTO email_log (
-                    id, contact_id, email_type, subject, body, template_variant, sent_at,
-                    message_id, status, opened_at, clicked_at, replied_at, direction
+            for row in rows:
+                email = (row.get("email") or "").strip().lower()
+                if not email:
+                    continue
+                sent_at = _sent_at_from_agent_row(row)
+                agent_row = {
+                    "email": email,
+                    "owner_name": row.get("name") or "",
+                    "business_name": row.get("company") or "",
+                    "segment": row.get("segment") or "",
+                }
+                cid = get_or_create_contact_id_cur(cur, agent_row)
+                status = (row.get("status") or "").strip().lower() or "unknown"
+                if status not in valid_statuses:
+                    status = "skipped"
+                mid = (row.get("message_id") or "").strip() or None
+                log_id = str(uuid.uuid4())
+                body = (row.get("body") or row.get("body_text") or "").strip() or None
+                cur.execute(
+                    """
+                    INSERT INTO email_log (
+                        id, contact_id, email_type, subject, body, template_variant, sent_at,
+                        message_id, status, opened_at, clicked_at, replied_at, direction
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'outbound')
+                    """,
+                    (
+                        log_id,
+                        cid,
+                        (row.get("mail_kind") or "unknown")[:64],
+                        (row.get("subject") or "")[:2000],
+                        body,
+                        (row.get("template_variant") or "")[:32],
+                        sent_at,
+                        mid,
+                        status[:64],
+                    ),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, NULL, 'outbound')
-                """,
-                (
-                    log_id,
-                    cid,
-                    (row.get("mail_kind") or "unknown")[:64],
-                    (row.get("subject") or "")[:2000],
-                    body,
-                    (row.get("template_variant") or "")[:32],
-                    sent_at,
-                    mid,
-                    status[:64],
-                ),
-            )
+
+
+def insert_email_log_from_agent_row(row: Dict[str, Any]) -> None:
+    """Append one logical send-log row (matches legacy CSV columns)."""
+    insert_email_log_from_agent_rows([row])
 
 
 def ingest_ses_events_from_jsonl(sns_path: Path) -> int:

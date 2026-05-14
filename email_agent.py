@@ -650,6 +650,26 @@ def sent_today_to_recipient(log_path: Path, email: str) -> bool:
     return False
 
 
+def _emails_with_any_sent_today_from_log(log_path: Path) -> Set[str]:
+    """
+    Emails with any successful send logged today (EST calendar date on row),
+    matching sent_today_to_recipient() when DATABASE_URL is unset.
+    """
+    out: Set[str] = set()
+    if not log_path.exists():
+        return out
+    today = datetime.now(tz=EST).date().isoformat()
+    with log_path.open("r", encoding="utf-8", newline="") as fp:
+        reader = csv.DictReader(fp)
+        for row in reader:
+            if row.get("sent_date_est") != today or row.get("status") != "sent":
+                continue
+            e = (row.get("email") or "").strip().lower()
+            if e:
+                out.add(e)
+    return out
+
+
 # First successful production send of each EST calendar day: BCC-style copy to this inbox (not logged).
 DAILY_TEST_COPY_TO = "govind@auotam.com"
 DAILY_TEST_COPY_SUBJECT_PREFIX = "[TEST COPY] "
@@ -1114,7 +1134,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     if budget == 0:
         print(f"Daily cap reached ({cfg.daily_cap}). Nothing to send.")
         return
-    print(f"Orchestrate: daily budget remaining={budget}")
+    print(f"Orchestrate: daily budget remaining={budget}", flush=True)
 
     ses = None
     if not args.dry_run and cfg.provider == "ses":
@@ -1135,7 +1155,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     suppression_cache: Set[str] = load_suppression_lists(cfg.suppression_dir)
     unsub_set, bounce_set = load_unsub_and_bounce_sets(cfg.suppression_dir)
     state = load_sequence_state(seq_path)
-    for _em, st in list(state.items()):
+    for _em, st in state.items():
         merge_list_flags_into_record(st, _em, unsub_set, bounce_set)
 
     csv_by_email: Dict[str, dict] = {}
@@ -1144,6 +1164,11 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         if is_valid_email(e):
             csv_by_email[e] = row
 
+    print(
+        f"Orchestrate: indexed {len(csv_by_email)} CSV rows, {len(state)} sequence records",
+        flush=True,
+    )
+
     domain_counts = load_domain_sent_today(log_path)
     today_d: date = datetime.now(tz=EST).date()
     today_iso = today_d.isoformat()
@@ -1151,6 +1176,39 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     sent = 0
     skipped = 0
     seen_today: Set[str] = set()
+
+    from auotam.db import database_url
+
+    if pg_store.use_database():
+        recipient_sent_today_cache: Set[str] = pg_store.emails_with_initial_sent_today_est()
+    else:
+        recipient_sent_today_cache = _emails_with_any_sent_today_from_log(log_path)
+
+    _ORCH_SKIP_LOG_CHUNK = 500
+    skip_log_buffer: List[dict] = []
+
+    def flush_orchestrate_skip_buffer() -> None:
+        if not skip_log_buffer:
+            return
+        if pg_store.use_database():
+            pg_store.insert_email_log_from_agent_rows(skip_log_buffer)
+        else:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not log_path.exists()
+            with log_path.open("a", encoding="utf-8", newline="") as fp:
+                writer = csv.DictWriter(fp, fieldnames=LOG_FIELDS, extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                for lr in skip_log_buffer:
+                    writer.writerow(lr)
+        skip_log_buffer.clear()
+
+    def note_recipient_sent_today(em_l: str, kind: str) -> None:
+        if database_url():
+            if kind == "initial":
+                recipient_sent_today_cache.add(em_l)
+        else:
+            recipient_sent_today_cache.add(em_l)
 
     def log_skip_orchestrate(
         em: str,
@@ -1165,8 +1223,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         skipped += 1
         r = row or {}
         ts_now = datetime.now(tz=EST)
-        append_log(
-            log_path,
+        skip_log_buffer.append(
             {
                 "timestamp_est": ts_now.isoformat(),
                 "sent_date_est": ts_now.date().isoformat(),
@@ -1184,8 +1241,10 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 "message_id": "",
                 "entity_detail_id": str(r.get("entity_detail_id", "") or ""),
                 "uei": str(r.get("uei", "") or ""),
-            },
+            }
         )
+        if len(skip_log_buffer) >= _ORCH_SKIP_LOG_CHUNK:
+            flush_orchestrate_skip_buffer()
 
     def pre_send_gates(
         em_lower: str,
@@ -1202,7 +1261,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             return "suppressed"
         if is_role_address(em_lower):
             return "role_address"
-        if sent_today_to_recipient(log_path, em_lower) or em_lower in seen_today:
+        if em_lower in recipient_sent_today_cache or em_lower in seen_today:
             return "already_sent_today"
         dom = em_lower.split("@", 1)[1]
         if domain_counts.get(dom, 0) >= cfg.max_per_day_per_domain:
@@ -1297,6 +1356,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 budget -= 1
                 sent += 1
                 seen_today.add(email)
+                note_recipient_sent_today(email, mail_kind)
                 st = state.setdefault(email, default_record(email))
                 merge_list_flags_into_record(st, email, unsub_set, bounce_set)
                 st[sent_key] = today_iso
@@ -1328,143 +1388,147 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 )
             time.sleep(sleep_seconds)
 
-    run_followup_step(2, 5, None, "email_2_sent", "followup_2")
-    run_followup_step(3, 10, "email_2_sent", "email_3_sent", "followup_3")
-    run_followup_step(4, 16, "email_3_sent", "email_4_sent", "followup_4")
-
-    seen_init: Set[str] = set()
-    for row in read_csv_rows(input_csv):
-        if budget <= 0:
-            break
-        to_email = (row.get("email") or "").strip()
-        if not is_valid_email(to_email):
-            continue
-        em_lower = to_email.lower()
-        if em_lower in seen_init:
-            continue
-        seen_init.add(em_lower)
-        row = merge_contact_website_from_db(row, em_lower)
-
-        company = (row.get("business_name") or "").strip()
-        name = (row.get("owner_name") or "").strip()
-        segment = (row.get("segment") or "").strip().lower()
-        ts_now = datetime.now(tz=EST)
-        from_email, from_name = resolve_from_identity()
-        sending_domain = sending_domain_from_from_email(from_email)
-
-        sk = pre_send_gates(em_lower, row, "initial", from_email, from_name, sending_domain)
-        if sk:
-            log_skip_orchestrate(em_lower, row, sk, "initial", from_email, from_name, sending_domain)
-            continue
-
-        if pg_store.use_database():
-            try:
-                cid = pg_store.get_or_create_contact_id_for_row(
-                    {
-                        "email": em_lower,
-                        "owner_name": name,
-                        "business_name": company,
-                        "segment": segment,
-                        "website": (row.get("website") or "").strip(),
-                    }
-                )
-                if pg_store.is_lead_status_blocked(cid):
-                    log_skip_orchestrate(
-                        em_lower,
-                        row,
-                        "lead_won_or_not_interested",
-                        "initial",
-                        from_email,
-                        from_name,
-                        sending_domain,
+    try:
+        run_followup_step(2, 5, None, "email_2_sent", "followup_2")
+        run_followup_step(3, 10, "email_2_sent", "email_3_sent", "followup_3")
+        run_followup_step(4, 16, "email_3_sent", "email_4_sent", "followup_4")
+        
+        seen_init: Set[str] = set()
+        for row in read_csv_rows(input_csv):
+            if budget <= 0:
+                break
+            to_email = (row.get("email") or "").strip()
+            if not is_valid_email(to_email):
+                continue
+            em_lower = to_email.lower()
+            if em_lower in seen_init:
+                continue
+            seen_init.add(em_lower)
+            row = merge_contact_website_from_db(row, em_lower)
+        
+            company = (row.get("business_name") or "").strip()
+            name = (row.get("owner_name") or "").strip()
+            segment = (row.get("segment") or "").strip().lower()
+            ts_now = datetime.now(tz=EST)
+            from_email, from_name = resolve_from_identity()
+            sending_domain = sending_domain_from_from_email(from_email)
+        
+            sk = pre_send_gates(em_lower, row, "initial", from_email, from_name, sending_domain)
+            if sk:
+                log_skip_orchestrate(em_lower, row, sk, "initial", from_email, from_name, sending_domain)
+                continue
+        
+            if pg_store.use_database():
+                try:
+                    cid = pg_store.get_or_create_contact_id_for_row(
+                        {
+                            "email": em_lower,
+                            "owner_name": name,
+                            "business_name": company,
+                            "segment": segment,
+                            "website": (row.get("website") or "").strip(),
+                        }
                     )
+                    if pg_store.is_lead_status_blocked(cid):
+                        log_skip_orchestrate(
+                            em_lower,
+                            row,
+                            "lead_won_or_not_interested",
+                            "initial",
+                            from_email,
+                            from_name,
+                            sending_domain,
+                        )
+                        continue
+                except ValueError:
                     continue
-            except ValueError:
+        
+            st = state.get(em_lower, default_record(em_lower))
+            merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+            if st.get("replied"):
+                log_skip_orchestrate(em_lower, row, "replied", "initial", from_email, from_name, sending_domain)
                 continue
-
-        st = state.get(em_lower, default_record(em_lower))
-        merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
-        if st.get("replied"):
-            log_skip_orchestrate(em_lower, row, "replied", "initial", from_email, from_name, sending_domain)
-            continue
-        if st.get("unsubscribed") or st.get("bounced"):
-            log_skip_orchestrate(
-                em_lower, row, "unsubscribed_or_bounced", "initial", from_email, from_name, sending_domain
-            )
-            continue
-        if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d) and not (st.get("email_1_sent") or ""):
-            log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
-            continue
-        if (st.get("email_1_sent") or "").strip():
-            if not (st.get("email_4_sent") or "").strip():
+            if st.get("unsubscribed") or st.get("bounced"):
                 log_skip_orchestrate(
-                    em_lower, row, "sequence_in_progress", "initial", from_email, from_name, sending_domain
+                    em_lower, row, "unsubscribed_or_bounced", "initial", from_email, from_name, sending_domain
                 )
                 continue
-            if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d):
+            if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d) and not (st.get("email_1_sent") or ""):
                 log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
                 continue
-            st = default_record(em_lower)
-            merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
-
-        recipient_domain = em_lower.split("@", 1)[1]
-        email_content = build_email(row, to_email=em_lower, base_url=cfg.base_url)
-        status, _mid, _reason = _send_single_message(
-            cfg,
-            args,
-            ses,
-            from_email=from_email,
-            from_name=from_name,
-            sending_domain=sending_domain,
-            recipient_domain=recipient_domain,
-            em_lower=em_lower,
-            subject=email_content["subject"],
-            body_text=email_content["body"],
-            log_path=log_path,
-            ses_status_path=ses_status_path,
-            company=company,
-            name=name,
-            segment=segment,
-            entity_detail_id=str(row.get("entity_detail_id", "") or ""),
-            uei=str(row.get("uei", "") or ""),
-            mail_kind="initial",
-            template_variant=email_content.get("variant", ""),
-            domain_counts=domain_counts,
-            ts_now=ts_now,
-        )
-        if status == "sent":
-            budget -= 1
-            sent += 1
-            seen_today.add(em_lower)
-            st = state.setdefault(em_lower, default_record(em_lower))
-            merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
-            st["email_1_sent"] = today_iso
-            st["last_sent_date_est"] = today_iso
-            save_sequence_state(seq_path, state)
-            maybe_send_daily_test_copy_after_production_send(
+            if (st.get("email_1_sent") or "").strip():
+                if not (st.get("email_4_sent") or "").strip():
+                    log_skip_orchestrate(
+                        em_lower, row, "sequence_in_progress", "initial", from_email, from_name, sending_domain
+                    )
+                    continue
+                if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d):
+                    log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
+                    continue
+                st = default_record(em_lower)
+                merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+        
+            recipient_domain = em_lower.split("@", 1)[1]
+            email_content = build_email(row, to_email=em_lower, base_url=cfg.base_url)
+            status, _mid, _reason = _send_single_message(
                 cfg,
                 args,
                 ses,
-                log_path=log_path,
-                ses_status_path=ses_status_path,
-                domain_counts=domain_counts,
-                today_iso=today_iso,
                 from_email=from_email,
                 from_name=from_name,
                 sending_domain=sending_domain,
+                recipient_domain=recipient_domain,
+                em_lower=em_lower,
                 subject=email_content["subject"],
                 body_text=email_content["body"],
+                log_path=log_path,
+                ses_status_path=ses_status_path,
                 company=company,
                 name=name,
                 segment=segment,
                 entity_detail_id=str(row.get("entity_detail_id", "") or ""),
                 uei=str(row.get("uei", "") or ""),
                 mail_kind="initial",
-                template_variant=email_content.get("variant", "") or "",
+                template_variant=email_content.get("variant", ""),
+                domain_counts=domain_counts,
+                ts_now=ts_now,
             )
-        time.sleep(sleep_seconds)
+            if status == "sent":
+                budget -= 1
+                sent += 1
+                seen_today.add(em_lower)
+                note_recipient_sent_today(em_lower, "initial")
+                st = state.setdefault(em_lower, default_record(em_lower))
+                merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
+                st["email_1_sent"] = today_iso
+                st["last_sent_date_est"] = today_iso
+                save_sequence_state(seq_path, state)
+                maybe_send_daily_test_copy_after_production_send(
+                    cfg,
+                    args,
+                    ses,
+                    log_path=log_path,
+                    ses_status_path=ses_status_path,
+                    domain_counts=domain_counts,
+                    today_iso=today_iso,
+                    from_email=from_email,
+                    from_name=from_name,
+                    sending_domain=sending_domain,
+                    subject=email_content["subject"],
+                    body_text=email_content["body"],
+                    company=company,
+                    name=name,
+                    segment=segment,
+                    entity_detail_id=str(row.get("entity_detail_id", "") or ""),
+                    uei=str(row.get("uei", "") or ""),
+                    mail_kind="initial",
+                    template_variant=email_content.get("variant", "") or "",
+                )
+            time.sleep(sleep_seconds)
 
-    print(f"Orchestrate completed. sent={sent}, skipped={skipped}, log={log_path}, sequence={seq_path}")
+        print(f"Orchestrate completed. sent={sent}, skipped={skipped}, log={log_path}, sequence={seq_path}")
+    finally:
+        flush_orchestrate_skip_buffer()
 
 
 def ingest_events(args: argparse.Namespace) -> None:
