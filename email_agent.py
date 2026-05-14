@@ -102,13 +102,13 @@ def _tpl(subject: str, body: str) -> Dict[str, str]:
 
 COMMON_CLOSE = (
     "Book a free 30-min call: auotam.com/book\n\n"
-    "Govind Chauhan\n\n"
+    "Govind Chauhan\n"
     "Founder, AUOTAM"
 )
 CASE_STUDIES_CLOSE = (
     "See how we've done this across industries: auotam.com/case-studies\n\n"
     "Book a free 30-min call: auotam.com/book\n\n"
-    "Govind Chauhan\n\n"
+    "Govind Chauhan\n"
     "Founder, AUOTAM"
 )
 
