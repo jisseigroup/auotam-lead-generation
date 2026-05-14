@@ -1406,9 +1406,16 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         run_followup_step(3, 10, "email_2_sent", "email_3_sent", "followup_3")
         run_followup_step(4, 16, "email_3_sent", "email_4_sent", "followup_4")
 
-        for _n, (em_lower, row) in enumerate(
-            sorted(csv_by_email.items(), key=lambda kv: kv[0]), start=1
-        ):
+        print(
+            "Orchestrate: follow-ups done; about to sort csv_by_email for initial pass",
+            flush=True,
+        )
+        _initial_csv_items = sorted(csv_by_email.items(), key=lambda kv: kv[0])
+        print(
+            f"Orchestrate: sort complete ({len(_initial_csv_items)} rows); entering initial enumerate loop",
+            flush=True,
+        )
+        for _n, (em_lower, row) in enumerate(_initial_csv_items, start=1):
             if _n % 10_000 == 0:
                 print(
                     f"Orchestrate: initial CSV scan row {_n} (sent={sent}, skipped={skipped}, budget={budget})",
