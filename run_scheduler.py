@@ -6,6 +6,7 @@ It wraps `email_agent.py orchestrate` and runs in a loop:
 - Mon-Fri only
 - EST business-hour gate
 - Hourly pacing toward daily target
+- Loads repo `.env` into the parent process before counting sends (so `sent_today` matches DB logging)
 - Cost guard: before each send attempt, queries AWS Cost Explorer (MTD UnblendedCost);
   pauses if spend >= ceiling (default $50). On API failure, logs warning and allows send.
 
@@ -60,6 +61,22 @@ def subprocess_env_with_repo_dotenv() -> dict[str, str]:
     """Merge current process env with repo-root .env so subprocesses see DATABASE_URL etc."""
     dot = parse_dotenv_file(_REPO_ROOT / ".env")
     return {**os.environ, **dot}
+
+
+def merge_repo_dotenv_into_environ() -> None:
+    """
+    Fill missing (or blank) os.environ keys from repo .env.
+
+    The scheduler subprocess already gets DATABASE_URL via subprocess_env_with_repo_dotenv.
+    The parent process must see the same vars for sent_today() / database_url(); otherwise
+    sent_today reads the CSV (often empty when logging to Postgres) and stays 0 while the
+    child caps at already+per_hour → orchestrate budget hits 0 after the first DB-logged burst.
+    """
+    for key, val in parse_dotenv_file(_REPO_ROOT / ".env").items():
+        if not val:
+            continue
+        if not (os.environ.get(key) or "").strip():
+            os.environ[key] = val
 
 
 def now_est() -> datetime:
@@ -276,6 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    merge_repo_dotenv_into_environ()
     args = build_parser().parse_args()
     scheduler_loop(args)
 
