@@ -1406,7 +1406,14 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         run_followup_step(3, 10, "email_2_sent", "email_3_sent", "followup_3")
         run_followup_step(4, 16, "email_3_sent", "email_4_sent", "followup_4")
 
-        for em_lower, row in sorted(csv_by_email.items(), key=lambda kv: kv[0]):
+        for _n, (em_lower, row) in enumerate(
+            sorted(csv_by_email.items(), key=lambda kv: kv[0]), start=1
+        ):
+            if _n % 10_000 == 0:
+                print(
+                    f"Orchestrate: initial CSV scan row {_n} (sent={sent}, skipped={skipped}, budget={budget})",
+                    flush=True,
+                )
             if budget <= 0:
                 break
             if em_lower in orchestrate_initial_hard_skip:
@@ -1504,6 +1511,8 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                     mail_kind="initial",
                     template_variant=email_content.get("variant", "") or "",
                 )
+                if budget <= 0:
+                    break
             time.sleep(sleep_seconds)
 
         print(f"Orchestrate completed. sent={sent}, skipped={skipped}, log={log_path}, sequence={seq_path}")
