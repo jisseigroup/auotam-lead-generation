@@ -42,7 +42,7 @@ from zoneinfo import ZoneInfo
 
 from auotam.sendgrid_client import send_mail as sendgrid_send_mail
 from auotam.identities import pick_identity
-from auotam.dormant_list import append_dormant, is_dormant_cooldown_active
+from auotam.dormant_list import DORMANT_COOLDOWN_DAYS, append_dormant, is_dormant_cooldown_active, load_dormant_since
 from auotam.followup_templates import build_followup
 from auotam.sequence_status import (
     DEFAULT_SEQUENCE_STATUS_PATH,
@@ -1184,6 +1184,34 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     else:
         recipient_sent_today_cache = _emails_with_any_sent_today_from_log(log_path)
 
+    dormant_since_map: Dict[str, date] = load_dormant_since(cfg.suppression_dir)
+
+    def dormant_cooldown_active(em_lower: str) -> bool:
+        ds = dormant_since_map.get(em_lower)
+        if not ds:
+            return False
+        return (today_d - ds).days < DORMANT_COOLDOWN_DAYS
+
+    blocked_lead_emails: Set[str] = set()
+    if pg_store.use_database():
+        blocked_lead_emails = pg_store.load_blocked_lead_emails_lower()
+        print("Orchestrate: bulk-loading contact websites for CSV cohort...", flush=True)
+        _wmap = pg_store.load_contact_websites_for_emails(csv_by_email.keys())
+        for _em, _site in _wmap.items():
+            _row = csv_by_email.get(_em)
+            if _row is None or not _site:
+                continue
+            if not (_row.get("website") or "").strip():
+                csv_by_email[_em] = {**_row, "website": _site}
+        print(
+            f"Orchestrate: cohort DB maps ready (blocked_lead={len(blocked_lead_emails)}, "
+            f"websites_from_db={len(_wmap)})",
+            flush=True,
+        )
+
+    orchestrate_initial_hard_skip: Set[str] = (
+        set(suppression_cache) | set(recipient_sent_today_cache) | blocked_lead_emails
+    )
     _ORCH_SKIP_LOG_CHUNK = 500
     skip_log_buffer: List[dict] = []
 
@@ -1257,6 +1285,8 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         """Return skip reason or None if OK to send."""
         if not is_valid_email(em_lower):
             return "invalid_email"
+        if em_lower in blocked_lead_emails:
+            return "lead_won_or_not_interested"
         if is_suppressed(em_lower, suppression_cache):
             return "suppressed"
         if is_role_address(em_lower):
@@ -1300,29 +1330,12 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         for email, row, _d1 in cands:
             if budget <= 0:
                 return
-            row = merge_contact_website_from_db(row, email)
             from_email, from_name = resolve_from_identity()
             sending_domain = sending_domain_from_from_email(from_email)
             sk = pre_send_gates(email, row, mail_kind, from_email, from_name, sending_domain)
             if sk:
                 log_skip_orchestrate(email, row, sk, mail_kind, from_email, from_name, sending_domain)
                 continue
-            if pg_store.use_database():
-                try:
-                    cid = pg_store.get_or_create_contact_id_for_row(row)
-                    if pg_store.is_lead_status_blocked(cid):
-                        log_skip_orchestrate(
-                            email,
-                            row,
-                            "lead_won_or_not_interested",
-                            mail_kind,
-                            from_email,
-                            from_name,
-                            sending_domain,
-                        )
-                        continue
-                except ValueError:
-                    continue
             fn = split_first_name(row.get("owner_name", ""))
             co = (row.get("business_name") or "").strip() or "your business"
             tpl = build_followup(step, fn, co)
@@ -1392,57 +1405,24 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         run_followup_step(2, 5, None, "email_2_sent", "followup_2")
         run_followup_step(3, 10, "email_2_sent", "email_3_sent", "followup_3")
         run_followup_step(4, 16, "email_3_sent", "email_4_sent", "followup_4")
-        
-        seen_init: Set[str] = set()
-        for row in read_csv_rows(input_csv):
+
+        for em_lower, row in sorted(csv_by_email.items(), key=lambda kv: kv[0]):
             if budget <= 0:
                 break
-            to_email = (row.get("email") or "").strip()
-            if not is_valid_email(to_email):
+            if em_lower in orchestrate_initial_hard_skip:
                 continue
-            em_lower = to_email.lower()
-            if em_lower in seen_init:
-                continue
-            seen_init.add(em_lower)
-            row = merge_contact_website_from_db(row, em_lower)
-        
             company = (row.get("business_name") or "").strip()
             name = (row.get("owner_name") or "").strip()
             segment = (row.get("segment") or "").strip().lower()
             ts_now = datetime.now(tz=EST)
             from_email, from_name = resolve_from_identity()
             sending_domain = sending_domain_from_from_email(from_email)
-        
+
             sk = pre_send_gates(em_lower, row, "initial", from_email, from_name, sending_domain)
             if sk:
                 log_skip_orchestrate(em_lower, row, sk, "initial", from_email, from_name, sending_domain)
                 continue
-        
-            if pg_store.use_database():
-                try:
-                    cid = pg_store.get_or_create_contact_id_for_row(
-                        {
-                            "email": em_lower,
-                            "owner_name": name,
-                            "business_name": company,
-                            "segment": segment,
-                            "website": (row.get("website") or "").strip(),
-                        }
-                    )
-                    if pg_store.is_lead_status_blocked(cid):
-                        log_skip_orchestrate(
-                            em_lower,
-                            row,
-                            "lead_won_or_not_interested",
-                            "initial",
-                            from_email,
-                            from_name,
-                            sending_domain,
-                        )
-                        continue
-                except ValueError:
-                    continue
-        
+
             st = state.get(em_lower, default_record(em_lower))
             merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
             if st.get("replied"):
@@ -1453,7 +1433,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                     em_lower, row, "unsubscribed_or_bounced", "initial", from_email, from_name, sending_domain
                 )
                 continue
-            if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d) and not (st.get("email_1_sent") or ""):
+            if dormant_cooldown_active(em_lower) and not (st.get("email_1_sent") or ""):
                 log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
                 continue
             if (st.get("email_1_sent") or "").strip():
@@ -1462,12 +1442,12 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                         em_lower, row, "sequence_in_progress", "initial", from_email, from_name, sending_domain
                     )
                     continue
-                if is_dormant_cooldown_active(em_lower, cfg.suppression_dir, today_d):
+                if dormant_cooldown_active(em_lower):
                     log_skip_orchestrate(em_lower, row, "dormant_cooldown", "initial", from_email, from_name, sending_domain)
                     continue
                 st = default_record(em_lower)
                 merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
-        
+
             recipient_domain = em_lower.split("@", 1)[1]
             email_content = build_email(row, to_email=em_lower, base_url=cfg.base_url)
             status, _mid, _reason = _send_single_message(

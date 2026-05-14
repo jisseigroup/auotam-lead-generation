@@ -12,7 +12,7 @@ import json
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from zoneinfo import ZoneInfo
 
@@ -229,6 +229,59 @@ def is_lead_status_blocked(contact_id: str) -> bool:
             if not row or not row[0]:
                 return False
             return str(row[0]).strip().lower() in _BLOCKED_LEAD_STATUSES
+
+
+_EMAIL_ANY_CHUNK = 4000
+
+
+def load_blocked_lead_emails_lower() -> Set[str]:
+    """Distinct lower(emails) on contacts whose CRM lead status is won or not_interested."""
+    out: Set[str] = set()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT lower(c.email)
+                FROM lead_status ls
+                JOIN contacts c ON c.id = ls.contact_id
+                WHERE lower(coalesce(ls.status::text, '')) IN ('won', 'not_interested')
+                """
+            )
+            for (em,) in cur.fetchall():
+                if em:
+                    out.add(str(em).strip().lower())
+    return out
+
+
+def load_contact_websites_for_emails(emails: Iterable[str]) -> Dict[str, str]:
+    """
+    Bulk-load non-empty website by lower(email) for the given cohort.
+    Chunked ANY() queries — intended for orchestrate (no per-row SELECT).
+    """
+    uniq = list({(e or "").strip().lower() for e in emails if e and "@" in e})
+    out: Dict[str, str] = {}
+    if not uniq:
+        return out
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for i in range(0, len(uniq), _EMAIL_ANY_CHUNK):
+                part = uniq[i : i + _EMAIL_ANY_CHUNK]
+                cur.execute(
+                    """
+                    SELECT lower(email), COALESCE(website, '')
+                    FROM contacts
+                    WHERE lower(email) = ANY(%s)
+                    """,
+                    (part,),
+                )
+                for em, site in cur.fetchall():
+                    if not em:
+                        continue
+                    eml = str(em).strip().lower()
+                    s = (site or "").strip()
+                    if s:
+                        out[eml] = s
+    return out
 
 
 def load_suppression_email_union() -> Set[str]:
