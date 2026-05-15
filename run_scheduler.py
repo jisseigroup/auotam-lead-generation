@@ -60,9 +60,14 @@ def parse_dotenv_file(path: Path) -> dict[str, str]:
 
 
 def subprocess_env_with_repo_dotenv() -> dict[str, str]:
-    """Merge current process env with repo-root .env so subprocesses see DATABASE_URL etc."""
+    """
+    Merge repo .env with the current process env.
+
+    Process env (PM2 ecosystem, shell exports) wins over .env so deploy-time
+    AUOTAM_FROM_EMAIL is not overridden by a stale FROM_EMAIL in .env.
+    """
     dot = parse_dotenv_file(_REPO_ROOT / ".env")
-    return {**os.environ, **dot}
+    return {**dot, **os.environ}
 
 
 def merge_repo_dotenv_into_environ() -> None:
@@ -152,8 +157,13 @@ def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
 
     if args.aws_region:
         cmd += ["--aws-region", args.aws_region]
-    if args.from_email:
-        cmd += ["--from-email", args.from_email]
+    from_email = (
+        (args.from_email or "").strip()
+        or (os.getenv("AUOTAM_FROM_EMAIL") or "").strip()
+        or (os.getenv("FROM_EMAIL") or "").strip()
+    )
+    if from_email:
+        cmd += ["--from-email", from_email]
     if args.from_name:
         cmd += ["--from-name", args.from_name]
     if args.reply_to:

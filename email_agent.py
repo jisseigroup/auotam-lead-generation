@@ -461,6 +461,19 @@ def sending_domain_from_from_email(from_email: str) -> str:
     return (from_email or "").split("@", 1)[-1].strip().lower()
 
 
+def resolve_from_email_from_env() -> str:
+    """Canonical sender: CLI/env AUOTAM_FROM_EMAIL, then FROM_EMAIL (legacy)."""
+    return (
+        (os.getenv("AUOTAM_FROM_EMAIL") or "").strip()
+        or (os.getenv("FROM_EMAIL") or "").strip()
+    )
+
+
+def _is_ses_unverified_identity_error(reason: str) -> bool:
+    r = (reason or "").lower()
+    return "not verified" in r or ("messagerejected" in r and "identities failed" in r)
+
+
 def is_role_address(email: str) -> bool:
     local = (email or "").strip().lower().split("@", 1)[0]
     return any(local.startswith(prefix) for prefix in ROLE_LOCALPART_PREFIXES)
@@ -545,7 +558,7 @@ def load_config(args: argparse.Namespace) -> Config:
         provider=provider,
         sendgrid_api_key=sendgrid_key,
         aws_region=args.aws_region or os.getenv("AWS_REGION", "us-east-1"),
-        from_email=args.from_email or os.getenv("FROM_EMAIL", os.getenv("AUOTAM_FROM_EMAIL", "")),
+        from_email=args.from_email or resolve_from_email_from_env(),
         from_name=args.from_name or os.getenv("AUOTAM_FROM_NAME", "Govind Chauhan"),
         configuration_set=args.configuration_set or os.getenv("SES_CONFIGURATION_SET"),
         base_url=(args.base_url or os.getenv("BASE_URL", "https://auotam.net")).rstrip("/"),
@@ -883,7 +896,9 @@ def _send_single_message(
 def send_batch(args: argparse.Namespace) -> None:
     """Email 1 (initial outreach) only — updates per-contact sequence state."""
     cfg = load_config(args)
-    lock_from = bool(args.from_email or os.getenv("FROM_EMAIL") or os.getenv("AUOTAM_FROM_EMAIL"))
+    lock_from = bool(
+        args.from_email or resolve_from_email_from_env() or os.getenv("SENDING_IDENTITIES", "").strip()
+    )
     input_csv = Path(args.input_csv)
     log_path = Path(args.log_csv)
     seq_path = Path(args.sequence_status_jsonl or os.getenv("SEQUENCE_STATUS_JSONL", str(DEFAULT_SEQUENCE_STATUS_PATH)))
@@ -1114,7 +1129,9 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     Follow-ups still use full sequence state from the DB; only the CSV cohort for merge/index/initial pass is clipped.
     """
     cfg = load_config(args)
-    lock_from = bool(args.from_email or os.getenv("FROM_EMAIL") or os.getenv("AUOTAM_FROM_EMAIL"))
+    lock_from = bool(
+        args.from_email or resolve_from_email_from_env() or os.getenv("SENDING_IDENTITIES", "").strip()
+    )
     input_csv = Path(args.input_csv)
     log_path = Path(args.log_csv)
     seq_path = Path(args.sequence_status_jsonl)
@@ -1147,6 +1164,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         print(f"Daily cap reached ({cfg.daily_cap}). Nothing to send.")
         return
     print(f"Orchestrate: daily budget remaining={budget}", flush=True)
+    print(f"Orchestrate: sender from_email={cfg.from_email!r}", flush=True)
 
     ses = None
     if not args.dry_run and cfg.provider == "ses":
@@ -1379,6 +1397,11 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 domain_counts=domain_counts,
                 ts_now=ts_now,
             )
+            if status == "failed" and _is_ses_unverified_identity_error(_err):
+                raise SystemExit(
+                    f"SES rejected sender identity ({from_email!r}): {_err}. "
+                    "Verify the address/domain in SES or set AUOTAM_FROM_EMAIL to a verified identity."
+                )
             if status == "sent":
                 budget -= 1
                 sent += 1
@@ -1413,7 +1436,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                     mail_kind=mail_kind,
                     template_variant="",
                 )
-            time.sleep(sleep_seconds)
+                time.sleep(sleep_seconds)
 
     try:
         run_followup_step(2, 5, None, "email_2_sent", "followup_2")
@@ -1535,6 +1558,11 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                     f"reason={_reason!r} ({time.monotonic() - _t_send:.3f}s)",
                     flush=True,
                 )
+            if status == "failed" and _is_ses_unverified_identity_error(_reason):
+                raise SystemExit(
+                    f"SES rejected sender identity ({from_email!r}): {_reason}. "
+                    "Verify the address/domain in SES or set AUOTAM_FROM_EMAIL to a verified identity."
+                )
             if status == "sent":
                 _first_send_this_run = sent == 0
                 budget -= 1
@@ -1580,7 +1608,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 )
                 if budget <= 0:
                     break
-            time.sleep(sleep_seconds)
+                time.sleep(sleep_seconds)
 
         print(f"Orchestrate completed. sent={sent}, skipped={skipped}, log={log_path}, sequence={seq_path}")
     finally:
