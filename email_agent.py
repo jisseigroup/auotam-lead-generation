@@ -1230,6 +1230,8 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     def flush_orchestrate_skip_buffer() -> None:
         if not skip_log_buffer:
             return
+        n_buf = len(skip_log_buffer)
+        print(f"Orchestrate: flushing {n_buf} skip log rows to DB/CSV", flush=True)
         if pg_store.use_database():
             pg_store.insert_email_log_from_agent_rows(skip_log_buffer)
         else:
@@ -1427,8 +1429,15 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             f"Orchestrate: sort complete ({len(_initial_csv_items)} rows); entering initial enumerate loop",
             flush=True,
         )
+        _orch_diag_first_candidate = True
         for _n, (em_lower, row) in enumerate(_initial_csv_items, start=1):
-            if _n % 10_000 == 0:
+            if _n == 1:
+                print(
+                    f"Orchestrate: initial loop iteration 1 started (email={em_lower}, "
+                    f"hard_skip={em_lower in orchestrate_initial_hard_skip})",
+                    flush=True,
+                )
+            elif _n % 500 == 0:
                 print(
                     f"Orchestrate: initial CSV scan row {_n} (sent={sent}, skipped={skipped}, budget={budget})",
                     flush=True,
@@ -1436,6 +1445,8 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             if budget <= 0:
                 break
             if em_lower in orchestrate_initial_hard_skip:
+                if _n == 1:
+                    print("Orchestrate: iteration 1 → hard_skip continue", flush=True)
                 continue
             company = (row.get("business_name") or "").strip()
             name = (row.get("owner_name") or "").strip()
@@ -1444,7 +1455,19 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
             from_email, from_name = resolve_from_identity()
             sending_domain = sending_domain_from_from_email(from_email)
 
+            if _orch_diag_first_candidate:
+                _orch_diag_first_candidate = False
+                print(
+                    f"Orchestrate: first non-hard-skip row {_n} ({em_lower}); calling pre_send_gates",
+                    flush=True,
+                )
+            _t_gates = time.monotonic()
             sk = pre_send_gates(em_lower, row, "initial", from_email, from_name, sending_domain)
+            if _n <= 3 or (sent == 0 and skipped < 5):
+                print(
+                    f"Orchestrate: row {_n} pre_send_gates → {sk!r} ({time.monotonic() - _t_gates:.3f}s)",
+                    flush=True,
+                )
             if sk:
                 log_skip_orchestrate(em_lower, row, sk, "initial", from_email, from_name, sending_domain)
                 continue
@@ -1476,6 +1499,13 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
 
             recipient_domain = em_lower.split("@", 1)[1]
             email_content = build_email(row, to_email=em_lower, base_url=cfg.base_url)
+            if sent == 0:
+                print(
+                    f"Orchestrate: row {_n} before _send_single_message ({em_lower}); "
+                    f"provider={cfg.provider} dry_run={args.dry_run}",
+                    flush=True,
+                )
+            _t_send = time.monotonic()
             status, _mid, _reason = _send_single_message(
                 cfg,
                 args,
@@ -1499,7 +1529,14 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 domain_counts=domain_counts,
                 ts_now=ts_now,
             )
+            if sent == 0:
+                print(
+                    f"Orchestrate: row {_n} after _send_single_message status={status!r} "
+                    f"reason={_reason!r} ({time.monotonic() - _t_send:.3f}s)",
+                    flush=True,
+                )
             if status == "sent":
+                _first_send_this_run = sent == 0
                 budget -= 1
                 sent += 1
                 seen_today.add(em_lower)
@@ -1508,7 +1545,18 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
                 st["email_1_sent"] = today_iso
                 st["last_sent_date_est"] = today_iso
+                if _first_send_this_run:
+                    print(
+                        f"Orchestrate: before save_sequence_state ({len(state)} contacts in memory)",
+                        flush=True,
+                    )
+                _t_seq = time.monotonic()
                 save_sequence_state(seq_path, state)
+                if _first_send_this_run:
+                    print(
+                        f"Orchestrate: after save_sequence_state ({time.monotonic() - _t_seq:.3f}s)",
+                        flush=True,
+                    )
                 maybe_send_daily_test_copy_after_production_send(
                     cfg,
                     args,
