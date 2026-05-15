@@ -2,7 +2,9 @@
 """
 Weekday EST scheduler for AUOTAM email sending agent.
 
-It wraps `email_agent.py orchestrate` and runs in a loop:
+It wraps `email_agent.py orchestrate` and runs in a loop (by default passes
+`--max-rows 5000` so each child run only reads the first 5000 CSV data rows; use
+`--max-rows 0` on the scheduler to read the full file):
 - Mon-Fri only
 - EST business-hour gate
 - Hourly pacing toward daily target
@@ -161,6 +163,8 @@ def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
     cmd += ["--provider", args.email_provider]
     if args.dry_run:
         cmd += ["--dry-run"]
+    if args.max_rows and args.max_rows > 0:
+        cmd += ["--max-rows", str(args.max_rows)]
 
     # Limit this invocation to per-run chunk by temporarily lowering daily cap.
     # We do that by passing cap = already_sent + per_run_cap.
@@ -260,6 +264,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start-hour-est", type=int, default=9, help="Window start hour EST")
     p.add_argument("--end-hour-est", type=int, default=17, help="Window end hour EST")
     p.add_argument("--sends-per-second", type=float, default=1.0, help="Max sends per second")
+    p.add_argument(
+        "--max-rows",
+        type=int,
+        default=5000,
+        help="Forwarded to email_agent orchestrate --max-rows (first N CSV data rows per run). Use 0 for no limit.",
+    )
     p.add_argument("--poll-interval-seconds", type=int, default=3600, help="Loop interval")
     p.add_argument("--aws-region", default="", help="AWS region")
     p.add_argument("--from-email", default="", help="SES verified sender")

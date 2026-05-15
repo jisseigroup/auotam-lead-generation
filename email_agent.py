@@ -584,11 +584,16 @@ def build_email(row: dict, to_email: str, base_url: str) -> Dict[str, str]:
     return {"subject": subject, "body": body, "variant": template.get("variant", "")}
 
 
-def read_csv_rows(path: Path) -> Iterable[dict]:
+def read_csv_rows(path: Path, max_rows: Optional[int] = None) -> Iterable[dict]:
+    """Yield CSV rows in file order. If max_rows is set, stop after that many data rows (after header)."""
     with path.open("r", encoding="utf-8", newline="") as fp:
         reader = csv.DictReader(fp)
+        n = 0
         for row in reader:
+            if max_rows is not None and n >= max_rows:
+                break
             yield row
+            n += 1
 
 
 def sent_today_count(log_path: Path) -> int:
@@ -1104,6 +1109,9 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
     """
     One session: follow-ups 2→3→4 (by day since Email 1), then Email 1 for new/re-eligible contacts.
     Shared daily cap, same window / throttles / suppression as send.
+
+    Use --max-rows N to cap how many leading CSV data rows are read (scheduler defaults via run_scheduler).
+    Follow-ups still use full sequence state from the DB; only the CSV cohort for merge/index/initial pass is clipped.
     """
     cfg = load_config(args)
     lock_from = bool(args.from_email or os.getenv("FROM_EMAIL") or os.getenv("AUOTAM_FROM_EMAIL"))
@@ -1124,8 +1132,12 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
 
     from auotam import pg_store
 
+    orch_max = args.max_rows if args.max_rows > 0 else None
+    if orch_max:
+        print(f"Orchestrate: CSV read limited to first {orch_max} data rows (--max-rows)", flush=True)
+
     if pg_store.use_database():
-        pg_store.maybe_bootstrap_contacts_from_csv(input_csv)
+        pg_store.maybe_bootstrap_contacts_from_csv(input_csv, max_rows=orch_max)
 
     if not args.dry_run and not in_sending_window(cfg.start_hour_est, cfg.end_hour_est):
         raise SystemExit("Outside allowed sending window (Mon-Fri, EST business hours).")
@@ -1159,7 +1171,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
         merge_list_flags_into_record(st, _em, unsub_set, bounce_set)
 
     csv_by_email: Dict[str, dict] = {}
-    for row in read_csv_rows(input_csv):
+    for row in read_csv_rows(input_csv, orch_max):
         e = (row.get("email") or "").strip().lower()
         if is_valid_email(e):
             csv_by_email[e] = row
@@ -1680,6 +1692,13 @@ def build_parser() -> argparse.ArgumentParser:
     orch.add_argument("--daily-cap", type=int, default=6000)
     orch.add_argument("--sends-per-second", type=float, default=1.0)
     orch.add_argument("--dry-run", action="store_true")
+    orch.add_argument(
+        "--max-rows",
+        type=int,
+        default=0,
+        help="If >0, only read the first N data rows from the input CSV (indexing, bootstrap, initial pass). "
+        "0 = read entire file. Scheduler defaults to passing 5000.",
+    )
 
     ingest = sub.add_parser("ingest-events", help="Ingest SES SNS event JSONL")
     ingest.add_argument("--sns-jsonl", required=True, help="SNS payload JSONL path")

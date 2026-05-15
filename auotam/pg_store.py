@@ -165,15 +165,19 @@ def get_or_create_contact_id_cur(cur, row: Dict[str, Any]) -> str:
     return str(new_id)
 
 
-def maybe_bootstrap_contacts_from_csv(csv_path: Path) -> None:
+def maybe_bootstrap_contacts_from_csv(csv_path: Path, max_rows: Optional[int] = None) -> None:
     """If contacts table is empty and CSV exists, bulk-import contacts."""
     if not use_database() or not csv_path.exists():
         return
     rows: List[Tuple[Any, ...]] = []
     seen: Set[str] = set()
+    rows_read = 0
     with csv_path.open("r", encoding="utf-8", newline="") as fp:
         reader = csv.DictReader(fp)
         for row in reader:
+            if max_rows is not None and rows_read >= max_rows:
+                break
+            rows_read += 1
             email = (row.get("email") or "").strip().lower()
             if "@" not in email or email in seen:
                 continue
