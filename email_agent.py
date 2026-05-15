@@ -461,12 +461,24 @@ def sending_domain_from_from_email(from_email: str) -> str:
     return (from_email or "").split("@", 1)[-1].strip().lower()
 
 
+_PRODUCTION_FROM_EMAIL = "sales@auotam.net"
+
+
+def _normalize_production_email(email: str) -> str:
+    """Map deprecated sales@auotam.com to verified sales@auotam.net."""
+    em = (email or "").strip().lower()
+    if em == "sales@auotam.com":
+        return _PRODUCTION_FROM_EMAIL
+    return (email or "").strip()
+
+
 def resolve_from_email_from_env() -> str:
     """Canonical sender: CLI/env AUOTAM_FROM_EMAIL, then FROM_EMAIL (legacy)."""
-    return (
+    raw = (
         (os.getenv("AUOTAM_FROM_EMAIL") or "").strip()
         or (os.getenv("FROM_EMAIL") or "").strip()
     )
+    return _normalize_production_email(raw) or _PRODUCTION_FROM_EMAIL
 
 
 def _is_ses_unverified_identity_error(reason: str) -> bool:
@@ -558,7 +570,7 @@ def load_config(args: argparse.Namespace) -> Config:
         provider=provider,
         sendgrid_api_key=sendgrid_key,
         aws_region=args.aws_region or os.getenv("AWS_REGION", "us-east-1"),
-        from_email=args.from_email or resolve_from_email_from_env(),
+        from_email=_normalize_production_email(args.from_email) or resolve_from_email_from_env(),
         from_name=args.from_name or os.getenv("AUOTAM_FROM_NAME", "Govind Chauhan"),
         configuration_set=args.configuration_set or os.getenv("SES_CONFIGURATION_SET"),
         base_url=(args.base_url or os.getenv("BASE_URL", "https://auotam.net")).rstrip("/"),
@@ -573,7 +585,10 @@ def load_config(args: argparse.Namespace) -> Config:
         end_hour_est=args.end_hour_est,
         daily_cap=args.daily_cap,
         sends_per_second=args.sends_per_second,
-        reply_to=args.reply_to or os.getenv("REPLY_TO", os.getenv("AUOTAM_REPLY_TO")),
+        reply_to=_normalize_production_email(
+            args.reply_to or os.getenv("REPLY_TO", os.getenv("AUOTAM_REPLY_TO", ""))
+        )
+        or _PRODUCTION_FROM_EMAIL,
     )
 
 

@@ -132,6 +132,16 @@ def seconds_until_next_check(interval_seconds: int) -> int:
     return max(10, interval_seconds)
 
 
+_SCHEDULER_FROM_EMAIL = "sales@auotam.net"
+
+
+def _normalize_scheduler_email(email: str) -> str:
+    em = (email or "").strip().lower()
+    if em == "sales@auotam.com":
+        return _SCHEDULER_FROM_EMAIL
+    return (email or "").strip() or _SCHEDULER_FROM_EMAIL
+
+
 def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
     cmd = [
         "python3",
@@ -157,7 +167,7 @@ def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
 
     if args.aws_region:
         cmd += ["--aws-region", args.aws_region]
-    from_email = (
+    from_email = _normalize_scheduler_email(
         (args.from_email or "").strip()
         or (os.getenv("AUOTAM_FROM_EMAIL") or "").strip()
         or (os.getenv("FROM_EMAIL") or "").strip()
