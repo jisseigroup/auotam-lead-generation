@@ -22,6 +22,7 @@ import argparse
 import csv
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,9 @@ from auotam.cost_guard import session_cost_check
 EST = ZoneInfo("America/New_York")
 
 _REPO_ROOT = Path(__file__).resolve().parent
+
+# Max wall time for one orchestrate child (prevents parent stuck forever in subprocess.run).
+_ORCHESTRATE_TIMEOUT_SEC = 5400
 
 
 def parse_dotenv_file(path: Path) -> dict[str, str]:
@@ -191,10 +195,25 @@ def run_send_once(args: argparse.Namespace, per_run_cap: int) -> int:
     # The caller computes this cap before invoking us.
     cmd[cmd.index("--daily-cap") + 1] = str(per_run_cap)
 
-    print(f"[{now_est().isoformat()}] Executing send run...")
+    print(f"[{now_est().isoformat()}] Executing send run...", flush=True)
     child_env = subprocess_env_with_repo_dotenv()
-    result = subprocess.run(cmd, check=False, env=child_env, cwd=str(_REPO_ROOT))
-    return result.returncode
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            env=child_env,
+            cwd=str(_REPO_ROOT),
+            stdout=None,
+            stderr=None,
+            timeout=_ORCHESTRATE_TIMEOUT_SEC,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print(
+            f"[{now_est().isoformat()}] Orchestrate timed out after {_ORCHESTRATE_TIMEOUT_SEC}s",
+            flush=True,
+        )
+        return -9
 
 
 def scheduler_loop(args: argparse.Namespace) -> None:
@@ -202,7 +221,8 @@ def scheduler_loop(args: argparse.Namespace) -> None:
     per_hour = hourly_target(args.daily_target, args.start_hour_est, args.end_hour_est)
     print(
         f"Scheduler started. daily_target={args.daily_target}, "
-        f"hourly_target={per_hour}, window={args.start_hour_est}:00-{args.end_hour_est}:00 EST"
+        f"hourly_target={per_hour}, window={args.start_hour_est}:00-{args.end_hour_est}:00 EST",
+        flush=True,
     )
 
     while True:
@@ -210,13 +230,21 @@ def scheduler_loop(args: argparse.Namespace) -> None:
         if not is_window_open(
             args.start_hour_est, args.end_hour_est, current, dry_run=args.dry_run
         ):
-            print(f"[{current.isoformat()}] Outside window. Sleeping {args.poll_interval_seconds}s.")
+            why = "weekend" if current.weekday() >= 5 else "outside_hours"
+            print(
+                f"[{current.isoformat()}] Outside window ({why}). "
+                f"Sleeping {args.poll_interval_seconds}s.",
+                flush=True,
+            )
             time.sleep(seconds_until_next_check(args.poll_interval_seconds))
             continue
 
         already = sent_today(log_csv)
         if already >= args.daily_target:
-            print(f"[{current.isoformat()}] Daily target reached ({already}/{args.daily_target}). Sleeping.")
+            print(
+                f"[{current.isoformat()}] Daily target reached ({already}/{args.daily_target}). Sleeping.",
+                flush=True,
+            )
             time.sleep(seconds_until_next_check(args.poll_interval_seconds))
             continue
 
@@ -252,10 +280,17 @@ def scheduler_loop(args: argparse.Namespace) -> None:
             this_run_cap = min(args.daily_target, already + per_hour)
         rc = run_send_once(args, per_run_cap=this_run_cap)
         if rc != 0:
-            print(f"[{now_est().isoformat()}] Send run failed with exit code {rc}.")
+            print(
+                f"[{now_est().isoformat()}] Send run failed with exit code {rc}.",
+                flush=True,
+            )
         else:
             updated = sent_today(log_csv)
-            print(f"[{now_est().isoformat()}] Progress: {updated}/{args.daily_target}")
+            print(
+                f"[{now_est().isoformat()}] Progress: {updated}/{args.daily_target}",
+                flush=True,
+            )
+        sys.stdout.flush()
 
         if args.once:
             print("Exiting because --once was set.")

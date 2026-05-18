@@ -50,6 +50,7 @@ from auotam.sequence_status import (
     load_sequence_state,
     merge_list_flags_into_record,
     parse_iso_date,
+    save_sequence_record,
     save_sequence_state,
 )
 from auotam.suppression import (
@@ -1108,7 +1109,7 @@ def send_batch(args: argparse.Namespace) -> None:
             st["email_1_sent"] = today_iso
             st["last_sent_date_est"] = today_iso
             state[em_lower] = st
-            save_sequence_state(seq_path, state)
+            save_sequence_record(seq_path, em_lower, st)
             maybe_send_daily_test_copy_after_production_send(
                 cfg,
                 args,
@@ -1429,7 +1430,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 if step == 4 and not st.get("replied"):
                     append_dormant(email, today_d, cfg.suppression_dir)
                     st["dormant"] = True
-                save_sequence_state(seq_path, state)
+                save_sequence_record(seq_path, email, st)
                 maybe_send_daily_test_copy_after_production_send(
                     cfg,
                     args,
@@ -1579,7 +1580,6 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                     "Verify the address/domain in SES or set AUOTAM_FROM_EMAIL to a verified identity."
                 )
             if status == "sent":
-                _first_send_this_run = sent == 0
                 budget -= 1
                 sent += 1
                 seen_today.add(em_lower)
@@ -1588,18 +1588,7 @@ def orchestrate_batch(args: argparse.Namespace) -> None:
                 merge_list_flags_into_record(st, em_lower, unsub_set, bounce_set)
                 st["email_1_sent"] = today_iso
                 st["last_sent_date_est"] = today_iso
-                if _first_send_this_run:
-                    print(
-                        f"Orchestrate: before save_sequence_state ({len(state)} contacts in memory)",
-                        flush=True,
-                    )
-                _t_seq = time.monotonic()
-                save_sequence_state(seq_path, state)
-                if _first_send_this_run:
-                    print(
-                        f"Orchestrate: after save_sequence_state ({time.monotonic() - _t_seq:.3f}s)",
-                        flush=True,
-                    )
+                save_sequence_record(seq_path, em_lower, st)
                 maybe_send_daily_test_copy_after_production_send(
                     cfg,
                     args,

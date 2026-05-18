@@ -393,65 +393,56 @@ def _sequence_tuple_from_record(rec: Dict[str, Any]) -> Tuple[Any, ...]:
     return (e1, e2, e3, e4, last_comm, seq_complete, dormant, dormant_until)
 
 
+def _upsert_sequence_status_cur(cur, email: str, rec: Dict[str, Any]) -> None:
+    em = (email or rec.get("email") or "").strip().lower()
+    if not em:
+        return
+    cid = get_contact_id_by_email_cur(cur, em)
+    if cid is None:
+        cid = get_or_create_contact_id_cur(cur, {"email": em})
+    e1, e2, e3, e4, last_comm, seq_complete, dormant, dormant_until = _sequence_tuple_from_record(
+        rec
+    )
+    cur.execute(
+        """
+        UPDATE sequence_status SET
+            email_1_sent = %s,
+            email_2_sent = %s,
+            email_3_sent = %s,
+            email_4_sent = %s,
+            last_communication = %s,
+            sequence_complete = %s,
+            dormant = %s,
+            dormant_until = %s
+        WHERE contact_id = %s
+        """,
+        (e1, e2, e3, e4, last_comm, seq_complete, dormant, dormant_until, cid),
+    )
+    if cur.rowcount == 0:
+        cur.execute(
+            """
+            INSERT INTO sequence_status (
+                contact_id, email_1_sent, email_2_sent, email_3_sent, email_4_sent,
+                last_communication, next_scheduled_email, sequence_complete, dormant, dormant_until
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s)
+            """,
+            (cid, e1, e2, e3, e4, last_comm, seq_complete, dormant, dormant_until),
+        )
+
+
+def save_sequence_record_dict(email: str, rec: Dict[str, Any]) -> None:
+    """Persist one contact's sequence row (avoids rewriting every contact on each send)."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _upsert_sequence_status_cur(cur, email, rec)
+
+
 def save_sequence_state_dict(state: Dict[str, Dict[str, Any]]) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             for em, rec in state.items():
-                em = (em or rec.get("email") or "").strip().lower()
-                if not em:
-                    continue
-                cid = get_contact_id_by_email_cur(cur, em)
-                if cid is None:
-                    cid = get_or_create_contact_id_cur(cur, {"email": em})
-                e1, e2, e3, e4, last_comm, seq_complete, dormant, dormant_until = (
-                    _sequence_tuple_from_record(rec)
-                )
-                cur.execute(
-                    """
-                    UPDATE sequence_status SET
-                        email_1_sent = %s,
-                        email_2_sent = %s,
-                        email_3_sent = %s,
-                        email_4_sent = %s,
-                        last_communication = %s,
-                        sequence_complete = %s,
-                        dormant = %s,
-                        dormant_until = %s
-                    WHERE contact_id = %s
-                    """,
-                    (
-                        e1,
-                        e2,
-                        e3,
-                        e4,
-                        last_comm,
-                        seq_complete,
-                        dormant,
-                        dormant_until,
-                        cid,
-                    ),
-                )
-                if cur.rowcount == 0:
-                    cur.execute(
-                        """
-                        INSERT INTO sequence_status (
-                            contact_id, email_1_sent, email_2_sent, email_3_sent, email_4_sent,
-                            last_communication, next_scheduled_email, sequence_complete, dormant, dormant_until
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s)
-                        """,
-                        (
-                            cid,
-                            e1,
-                            e2,
-                            e3,
-                            e4,
-                            last_comm,
-                            seq_complete,
-                            dormant,
-                            dormant_until,
-                        ),
-                    )
+                _upsert_sequence_status_cur(cur, em, rec)
 
 
 def is_dormant_cooldown_active_db(email: str, today: date) -> bool:

@@ -58,6 +58,21 @@ def load_sequence_state(path: Path | None = None) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def save_sequence_record(path: Path, email: str, rec: Dict[str, Any]) -> None:
+    """Persist one contact (preferred after each send when using PostgreSQL)."""
+    from auotam import pg_store
+
+    if pg_store.use_database():
+        pg_store.save_sequence_record_dict(email, rec)
+        return
+    em = (email or rec.get("email") or "").strip().lower()
+    if not em:
+        return
+    state = load_sequence_state(path)
+    state[em] = rec
+    save_sequence_state(path, state)
+
+
 def save_sequence_state(path: Path, state: Dict[str, Dict[str, Any]]) -> None:
     from auotam import pg_store
 
