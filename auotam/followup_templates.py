@@ -17,7 +17,7 @@ def build_followup(step: int, first_name: str, business_name: str) -> Dict[str, 
                 "operations they never get to the work that actually grows the business.\n\n"
                 "We've fixed this across housing, eCommerce, defense, healthcare and more.\n\n"
                 f"Worth 30 minutes to see if we can do the same for {bn}?\n\n"
-                "auotam.com/book\n\n"
+                "https://auotam.com/book\n\n"
                 "Govind\n"
                 "AUOTAM"
             ),
@@ -30,7 +30,7 @@ def build_followup(step: int, first_name: str, business_name: str) -> Dict[str, 
                 "Do you know exactly which parts of your day could be automated?\n\n"
                 "Most business owners don't — until we sit down and map it out together. That's when it clicks.\n\n"
                 "I'm offering free workflow reviews this month. 30 minutes. No cost. No obligation.\n\n"
-                "auotam.com/book\n\n"
+                "https://auotam.com/book\n\n"
                 "Govind\n"
                 "AUOTAM"
             ),
@@ -43,7 +43,7 @@ def build_followup(step: int, first_name: str, business_name: str) -> Dict[str, 
                 "Every day spent doing work you shouldn't be doing is a day your business didn't grow.\n\n"
                 "That's fixable. I've done it across dozens of businesses.\n\n"
                 "If the timing is ever right — I'm one conversation away.\n\n"
-                "auotam.com/book\n\n"
+                "https://auotam.com/book\n\n"
                 "Govind\n"
                 "AUOTAM"
             ),
